@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2020 NV Access Limited
-# This file may be used under the terms of the GNU General Public License, version 2 or later.
-# For more details see: https://www.gnu.org/licenses/gpl-2.0.html
+# Copyright (C) 2020-2026 NV Access Limited, Leonard de Ruijter
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 """This file provides robot library functions for NVDA system tests.
 It contains helper methods for system tests, most specifically related to NVDA
@@ -14,7 +14,7 @@ which provide library functions related to monitoring NVDA and asserting NVDA ou
 """
 
 # imported methods start with underscore (_) so they don't get imported into robot files as keywords
-from datetime import datetime as _datetime
+from datetime import datetime as _datetime  # noqa: I001
 from os.path import (
 	join as _pJoin,
 	abspath as _abspath,
@@ -24,10 +24,6 @@ from os.path import (
 	dirname as _dirname,
 )
 import tempfile as _tempFile
-from typing import (
-	Optional as _Optional,
-	Tuple as _Tuple,
-)
 from urllib.parse import quote as _quoteStr
 
 import typing
@@ -56,6 +52,14 @@ builtIn: BuiltIn = BuiltIn()
 opSys: _OpSysLib = _getLib("OperatingSystem")
 process: _Process = _getLib("Process")
 
+SPY_CONNECTION_TIMEOUT_SECS = 15
+"""The number of seconds to wait for the spy server when NVDA is started from source or installed."""
+
+INSTALLER_SPY_CONNECTION_TIMEOUT_SECS = 60
+"""The number of seconds to wait for the spy server when NVDA is started from the installer.
+The installer takes longer to reach the point where the spy is available.
+"""
+
 
 class _NvdaLocationData:
 	def __init__(self):
@@ -73,9 +77,9 @@ class _NvdaLocationData:
 			self.baseNVDACommandline = self._runNVDAFilePath
 		elif self.whichNVDA == "installed":
 			self._runNVDAFilePath = self.findInstalledNVDAPath()
-			self.baseNVDACommandline = f'"{str(self._runNVDAFilePath)}"'
+			self.baseNVDACommandline = f'"{self._runNVDAFilePath!s}"'
 			if self._installFilePath is not None:
-				self.NVDAInstallerCommandline = f'"{str(self._installFilePath)}"'
+				self.NVDAInstallerCommandline = f'"{self._installFilePath!s}"'
 		else:
 			raise AssertionError(
 				"RobotFramework should be run with argument: '-v whichNVDA:[source|installed]'",
@@ -88,7 +92,7 @@ class _NvdaLocationData:
 			"nvdaTestRunLogs",
 		)
 
-	def getPy2exeBootLogPath(self) -> _Optional[str]:
+	def getPy2exeBootLogPath(self) -> str | None:
 		if self.whichNVDA == "installed":
 			executablePath = _locations.findInstalledNVDAPath()
 			# py2exe names this log file after the executable, see py2exe/boot_common.py
@@ -96,7 +100,7 @@ class _NvdaLocationData:
 		elif self.whichNVDA == "source":
 			return None  # Py2exe not used for source.
 
-	def findInstalledNVDAPath(self) -> _Optional[str]:
+	def findInstalledNVDAPath(self) -> str | None:
 		NVDAFilePath = _pJoin(_expandvars("%PROGRAMFILES%"), "nvda", "nvda.exe")
 		legacyNVDAFilePath = _pJoin(_expandvars("%PROGRAMFILES%"), "NVDA", "nvda.exe")
 		exeErrorMsg = f"Unable to find installed NVDA exe. Paths tried: {NVDAFilePath}, {legacyNVDAFilePath}"
@@ -131,9 +135,9 @@ class NvdaLib:
 	"""
 
 	def __init__(self):
-		self.nvdaSpy: _Optional["NVDASpyLib"] = None
-		self.nvdaHandle: _Optional[int] = None
-		self.lastNVDAStart: _Optional[_datetime] = None
+		self.nvdaSpy: NVDASpyLib | None = None
+		self.nvdaHandle: int | None = None
+		self.lastNVDAStart: _datetime | None = None
 
 	@staticmethod
 	def _createTestIdFileName(name):
@@ -144,7 +148,7 @@ class NvdaLib:
 		return outputFileName
 
 	@staticmethod
-	def setup_nvda_profile(configFileName, gesturesFileName: _Optional[str] = None):
+	def setup_nvda_profile(configFileName, gesturesFileName: str | None = None):
 		configManager.setupProfile(
 			_locations.repoRoot,
 			configFileName,
@@ -163,15 +167,17 @@ class NvdaLib:
 	_spyServerURI = f"http://127.0.0.1:{_spyServerPort}"
 	_spyAlias = _nvdaSpyAlias
 
-	def _startNVDAProcess(self):
+	def _startNVDAProcess(self, language: str | None = None):
 		"""Start NVDA.
 		Use debug logging, replacing any current instance, using the system test profile directory
 		"""
 		_locations.ensurePathsExist()
+		langStr = "" if language is None else f' --lang="{language}"'
 		command = (
 			f"{_locations.baseNVDACommandline}"
 			f" --debug-logging"
 			f" -r"
+			f"{langStr}"
 			f' -c "{_locations.profileDir}"'
 			f' --log-file "{_locations.logPath}"'
 		)
@@ -205,7 +211,7 @@ class NvdaLib:
 		)
 		return handle
 
-	def _connectToRemoteServer(self, connectionTimeoutSecs: int = 15) -> None:
+	def _connectToRemoteServer(self, connectionTimeoutSecs: int = SPY_CONNECTION_TIMEOUT_SECS) -> None:
 		"""Connects to the nvdaSpyServer
 		Because we do not know how far through the startup NVDA is, we have to poll
 		to check that the server is available. Importing the library immediately seems
@@ -255,7 +261,7 @@ class NvdaLib:
 		def _makeKeywordCaller(lib, keyword):
 			def runKeyword(*args, **kwargs):
 				builtIn.log(
-					f"{keyword}" f"{f' {args}' if args else ''}" f"{f' {kwargs}' if kwargs else ''}",
+					f"{keyword}{f' {args}' if args else ''}{f' {kwargs}' if kwargs else ''}",
 				)
 				return lib.run_keyword(keyword, args, kwargs)
 
@@ -270,13 +276,13 @@ class NvdaLib:
 		return remoteLib
 
 	def start_NVDAInstaller(self, settingsFileName):
-		self.lastNVDAStart = _datetime.utcnow()
+		self.lastNVDAStart = _datetime.utcnow()  # noqa: DTZ003
 		builtIn.log(f"Starting NVDA with config: {settingsFileName}")
 		self.setup_nvda_profile(settingsFileName)
 		nvdaProcessHandle = self._startNVDAInstallerProcess()
 		process.process_should_be_running(nvdaProcessHandle)
 		# Timeout is increased due to the installer load time and start up splash sound
-		self._connectToRemoteServer(connectionTimeoutSecs=30)
+		self._connectToRemoteServer(connectionTimeoutSecs=INSTALLER_SPY_CONNECTION_TIMEOUT_SECS)
 		self.nvdaSpy.wait_for_NVDA_startup_to_complete()
 		return nvdaProcessHandle
 
@@ -294,12 +300,19 @@ class NvdaLib:
 				],
 			)
 
-	def start_NVDA(self, settingsFileName: str, gesturesFileName: _Optional[str] = None):
-		self.lastNVDAStart = _datetime.utcnow()
+	def start_NVDA(
+		self,
+		settingsFileName: str,
+		gesturesFileName: str | None = None,
+		language: str | None = None,
+	):
+		self.lastNVDAStart = _datetime.utcnow()  # noqa: DTZ003
 		builtIn.log(f"Starting NVDA with config: {settingsFileName}")
+		if language:
+			builtIn.log(f"Overriding startup language via command line: {language}")
 		self.setup_nvda_profile(settingsFileName, gesturesFileName)
 		builtIn.log("Config copied", level="DEBUG")  # observe timing of the startup
-		nvdaProcessHandle = self._startNVDAProcess()
+		nvdaProcessHandle = self._startNVDAProcess(language)
 		builtIn.log("Started NVDA process", level="DEBUG")  # observe timing of the startup
 		process.process_should_be_running(nvdaProcessHandle)
 		self._connectToRemoteServer()
@@ -312,11 +325,15 @@ class NvdaLib:
 		"""NVDA logs are saved to the ${OUTPUT DIR}/nvdaTestRunLogs/${SUITE NAME}-${TEST NAME}-nvda.log"""
 		builtIn.log("Saving NVDA log")
 		saveToPath = self.create_preserved_test_output_filename("nvda.log")
-		opSys.copy_file(
-			_locations.logPath,
-			saveToPath,
-		)
-		builtIn.log(f"Log saved to: {saveToPath}", level="DEBUG")
+		try:
+			opSys.copy_file(
+				_locations.logPath,
+				saveToPath,
+			)
+		except RuntimeError as e:
+			builtIn.log(f"Failed to save NVDA log: {e}", level="WARN")
+		else:
+			builtIn.log(f"Log saved to: {saveToPath}", level="DEBUG")
 
 	def save_py2exe_boot_log(self):
 		"""If a dialog shows: Errors in "nvda.exe", see the logfile at <path> for details.
@@ -352,7 +369,7 @@ class NvdaLib:
 			raise AssertionError(f"NVDA crashed during this test. Crash dump saved to: {crashDmpPath}")
 
 	def quit_NVDA(self):
-		builtIn.log("Stopping nvdaSpy server: {}".format(self._spyServerURI))
+		builtIn.log(f"Stopping nvdaSpy server: {self._spyServerURI}")
 		try:
 			_stopRemoteServer(self._spyServerURI, log=False)
 			process.run_process(
@@ -360,43 +377,43 @@ class NvdaLib:
 				shell=True,
 			)
 			process.wait_for_process(self.nvdaHandle)
-		except Exception:
+		except Exception:  # noqa: TRY203
 			raise
 		finally:
 			self._quitNVDAProcessCleanup()
 
 	def quit_NVDAInstaller(self):
-		builtIn.log("Stopping nvdaSpy server: {}".format(self._spyServerURI))
+		builtIn.log(f"Stopping nvdaSpy server: {self._spyServerURI}")
 		self.nvdaSpy.emulateKeyPress("insert+q")
 		self.nvdaSpy.wait_for_specific_speech("Exit NVDA")
 		self.nvdaSpy.emulateKeyPress("enter", blockUntilProcessed=False)
 		builtIn.sleep(1)
 		try:
 			_stopRemoteServer(self._spyServerURI, log=False)
-		except Exception:
+		except Exception:  # noqa: TRY203
 			raise
 		finally:
 			self._quitNVDAProcessCleanup()
 
 	@staticmethod
 	def check_for_crash_dump(
-		since: _Optional[_datetime],
-		overridePath: _Optional[str] = None,
-	) -> _Optional[str]:
+		since: _datetime | None,
+		overridePath: str | None = None,
+	) -> str | None:
 		"""
 		Checks if a crash.dmp exits and returns the crash dmp path if so
 		"""
 		crashPath = overridePath or _pJoin(_dirname(_locations.logPath), "nvda_crash.dmp")
 		try:
 			opSys.file_should_not_exist(crashPath)
-		except Exception:
+		except Exception:  # noqa: BLE001
 			crashTime = opSys.get_modified_time(crashPath, format="epoch")
-			crashTime = _datetime.fromtimestamp(crashTime)
+			crashTime = _datetime.fromtimestamp(crashTime)  # noqa: DTZ006
 			since = since.replace(microsecond=0)  # get_modified_time only reports seconds, not microseconds
 			if crashTime >= since:
 				return crashPath
 
-	def save_crash_dump_if_exists(self, deleteCachedAfter: bool = True) -> _Optional[str]:
+	def save_crash_dump_if_exists(self, deleteCachedAfter: bool = True) -> str | None:
 		crashPath = self.check_for_crash_dump(self.lastNVDAStart)
 		if crashPath is None:
 			return None
@@ -437,7 +454,7 @@ def getSpeechAfterKey(key) -> str:
 	return speech
 
 
-def getSpeechAndBrailleAfterKey(key) -> _Tuple[str, str]:
+def getSpeechAndBrailleAfterKey(key) -> tuple[str, str]:
 	"""Ensure speech has stopped, press key, and get speech until it stops, report the status of the
 	braille display.
 	@return: Tuple of Speech then Braille.

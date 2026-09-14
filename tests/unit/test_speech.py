@@ -5,8 +5,7 @@
 
 """Unit tests for the speech module."""
 
-import gettext
-import typing
+import gettext  # noqa: I001
 import unittest
 
 import config
@@ -16,7 +15,9 @@ from speech import (
 	_getSpellingSpeechAddCharMode,
 	_getSpellingSpeechWithoutCharMode,
 	cancelSpeech,
+	pauseSpeech,
 	speechCanceled,
+	post_speechPaused,
 )
 from speech.commands import (
 	BeepCommand,
@@ -102,6 +103,7 @@ class Test_getSpellingSpeechAddCharMode(unittest.TestCase):
 				CharacterModeCommand(True),
 				"b",
 				EndUtteranceCommand(),
+				CharacterModeCommand(False),
 			],
 		)
 		output = _getSpellingSpeechAddCharMode(seq)
@@ -110,7 +112,7 @@ class Test_getSpellingSpeechAddCharMode(unittest.TestCase):
 
 class Translation_Fake(gettext.NullTranslations):
 	originalTranslationFunction: gettext.NullTranslations
-	translationResults: typing.Dict[str, str]
+	translationResults: dict[str, str]
 
 	def __init__(self, originalTranslationFunction: gettext.NullTranslations):
 		self.originalTranslationFunction = originalTranslationFunction
@@ -525,6 +527,53 @@ class Test_getSpellingSpeechWithoutCharMode(unittest.TestCase):
 		)
 		self.assertEqual(repr(list(output)), expected)
 
+	def test_decomposedBindingToSpace(self):
+		# Note, with this test string, no normalization occurs at all.
+		# Yet we need to test this explicitly because splitAtCharacterBoundaries treats
+		# space plus acute as one character.
+		text = " ́"
+		expected = repr(
+			[
+				"space",
+				EndUtteranceCommand(),
+				"́",
+				EndUtteranceCommand(),
+			],
+		)
+		output1 = _getSpellingSpeechWithoutCharMode(
+			text=text,
+			locale=None,
+			useCharacterDescriptions=False,
+			sayCapForCapitals=False,
+			capPitchChange=0,
+			beepForCapitals=False,
+			unicodeNormalization=False,
+			reportNormalizedForCharacterNavigation=False,
+		)
+		self.assertEqual(repr(list(output1)), expected)
+		output2 = _getSpellingSpeechWithoutCharMode(
+			text=text,
+			locale=None,
+			useCharacterDescriptions=False,
+			sayCapForCapitals=False,
+			capPitchChange=0,
+			beepForCapitals=False,
+			unicodeNormalization=True,
+			reportNormalizedForCharacterNavigation=False,
+		)
+		self.assertEqual(repr(list(output2)), expected)
+		output3 = _getSpellingSpeechWithoutCharMode(
+			text=text,
+			locale=None,
+			useCharacterDescriptions=False,
+			sayCapForCapitals=False,
+			capPitchChange=0,
+			beepForCapitals=False,
+			unicodeNormalization=True,
+			reportNormalizedForCharacterNavigation=True,
+		)
+		self.assertEqual(repr(list(output3)), expected)
+
 	def test_normalizedInSymbolDict_normalizeOff(self):
 		expected = repr(
 			[
@@ -591,3 +640,10 @@ class SpeechExtensionPoints(unittest.TestCase):
 			speechCanceled,
 		):
 			cancelSpeech()
+
+	def test_post_speechPausedExtensionPoint(self):
+		with actionTester(self, post_speechPaused, switch=True):
+			pauseSpeech(True)
+
+		with actionTester(self, post_speechPaused, switch=False):
+			pauseSpeech(False)

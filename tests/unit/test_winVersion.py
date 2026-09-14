@@ -5,7 +5,7 @@
 
 """Unit tests for the Windows version module."""
 
-import unittest
+import unittest  # noqa: I001
 import sys
 import os
 import winVersion
@@ -25,8 +25,7 @@ class TestWinVersion(unittest.TestCase):
 	def test_getWinVerFromNonExistentRelease(self):
 		# Test the fact that there is no Windows 10 2003 (2004 exists, however).
 		with self.assertRaises(AttributeError):
-			# Flake8 F841: local variable name is assigned to but never used
-			may2020Update = winVersion.WIN10_2003  # NOQA: F841
+			winVersion.WIN10_2003  # noqa: B018
 
 	def test_moreRecentWinVer(self):
 		# Specifically to test operators.
@@ -90,7 +89,7 @@ class TestWinVersion(unittest.TestCase):
 	def test_winVerProcessorArchitecture(self):
 		# See if processor architecture matches what Windows says.
 		# Use os.environ to guard against platform.machine() giving odd results.
-		actualArchitecture = os.environ.get("PROCESSOR_ARCHITEW6432", os.environ["PROCESSOR_ARCHITECTURE"])
+		actualArchitecture = os.environ["PROCESSOR_ARCHITECTURE"]
 		self.assertEqual(winVersion.getWinVer().processorArchitecture, actualArchitecture)
 
 	def test_winVerUnknownWin11BuildToReleaseName(self):

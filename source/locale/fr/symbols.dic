@@ -105,6 +105,7 @@ $	dollar
 \\	barre oblique inversée
 ^	accent circonflexe
 _	souligné
+‐	trait d'union
 `	accent grave
 {	accolade gauche
 }	accolade droite
@@ -285,7 +286,7 @@ _	souligné
 ⊥	perpendiculaire à
 ⟂	ortogonal à
 ‖	norme de vecteur
-̂	normalise
+̂	chapeau
 ∿	sinusoïde
 ∡	angle mesuré
 ∢	angle sphérique

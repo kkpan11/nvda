@@ -1,11 +1,11 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2020-2022 NV Access Limited, Leonard de Ruijter, Cyrille Bougot
-# This file may be used under the terms of the GNU General Public License, version 2 or later.
-# For more details see: https://www.gnu.org/licenses/gpl-2.0.html
+# Copyright (C) 2020-2026 NV Access Limited, Leonard de Ruijter, Cyrille Bougot
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 """Logic for NVDA + Google Chrome tests"""
 
-import typing
+import typing  # noqa: I001
 import os
 from robot.libraries.BuiltIn import BuiltIn
 
@@ -65,6 +65,10 @@ def checkbox_labelled_by_inner_element():
 
 REVIEW_CURSOR_FOLLOW_CARET_KEY = ["reviewCursor", "followCaret"]
 REVIEW_CURSOR_FOLLOW_FOCUS_KEY = ["reviewCursor", "followFocus"]
+AUTO_LANGUAGE_SWITCHING_KEY = ["speech", "autoLanguageSwitching"]
+AUTO_DIALECT_SWITCHING_KEY = ["speech", "autoDialectSwitching"]
+REPORT_LANGUAGE_KEY = ["speech", "reportLanguage"]
+REPORT_NOT_SUPPORTED_LANGUAGE_KEY = ["speech", "reportNotSupportedLanguage"]
 READ_DETAILS_GESTURE = "NVDA+d"
 
 
@@ -83,7 +87,7 @@ def _getNoVBuf_AriaDetails_sample() -> str:
 
 def _doTestAriaDetails_NoVBufNoTextInterface(nvdaConfValues: "NVDASpyLib.NVDAConfMods"):
 	_chrome.prepareChrome(_getNoVBuf_AriaDetails_sample())
-	spy: "NVDASpyLib" = _NvdaLib.getSpyLib()
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
 	spy.modifyNVDAConfig(nvdaConfValues)
 
 	actualSpeech = _NvdaLib.getSpeechAfterKey("tab")
@@ -249,7 +253,7 @@ def test_mark_aria_details_role():
 	_asserts.braille_matches(
 		message="Browse mode braille: Read line with different aria details roles.",
 		actual=actualBraille,
-		expected=" ".join(
+		expected=" ".join(  # noqa: FLY002
 			[
 				"mln",
 				"edt ",
@@ -310,7 +314,7 @@ def test_mark_aria_details_role():
 	_asserts.braille_matches(
 		message="Focus mode braille: Read line with different aria details roles",
 		actual=actualBraille,
-		expected=" ".join(
+		expected=" ".join(  # noqa: FLY002
 			[
 				# no "mln edt"
 				# the role doc-endnote is unsupported as an IA2 role
@@ -363,7 +367,7 @@ def exercise_mark_aria_details(nvdaConfValues: "NVDASpyLib.NVDAConfMods"):
 		</div>
 		""",
 	)
-	spy: "NVDASpyLib" = _NvdaLib.getSpyLib()
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
 	spy.modifyNVDAConfig(nvdaConfValues)
 
 	actualSpeech, actualBraille = _NvdaLib.getSpeechAndBrailleAfterKey("downArrow")
@@ -923,7 +927,7 @@ def test_pr11606():
 	actualSpeech = _chrome.getSpeechAfterKey("end")
 	_asserts.strings_match(
 		actualSpeech,
-		"link",
+		"blank",
 	)
 	# Read the current line.
 	# Before pr #11606 the next line ("C D")  would have been read.
@@ -1004,18 +1008,12 @@ def test_ariaTreeGrid_browseMode():
 
 def ARIAInvalid_spellingAndGrammar():
 	"""
-		Tests ARIA invalid values of "spelling", "grammar" and "spelling, grammar".
-		Please note that although IAccessible2 allows multiple values for invalid,
-		multiple values to aria-invalid is not yet standard.
-		And even if it were, they would be separated by space, not comma
-	thus the html for this test would need to change,
-		but the expected output shouldn't need to.
+	Tests ARIA invalid values of "spelling" and "grammar".
 	"""
 	_chrome.prepareChrome(
 		r"""
 			<p>Big <span aria-invalid="spelling">caat</span> meos</p>
 			<p>Small <span aria-invalid="grammar">a dog</span> woofs</p>
-			<p>Fat <span aria-invalid="grammar, spelling">a ffrog</span> crokes</p>
 		""",
 	)
 	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
@@ -1027,11 +1025,6 @@ def ARIAInvalid_spellingAndGrammar():
 	_asserts.strings_match(
 		actualSpeech,
 		"Small  grammar error  a dog  woofs",
-	)
-	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
-	_asserts.strings_match(
-		actualSpeech,
-		"Fat  spelling error  grammar error  a ffrog  crokes",
 	)
 
 
@@ -1161,6 +1154,9 @@ def test_ariaRoleDescription_focus():
 	)
 
 
+IMG_DESC_MSG = "To get missing image descriptions, open the context menu."
+
+
 def test_ariaRoleDescription_inline_browseMode():
 	"""
 	NVDA should report the custom role for inline elements in browse mode.
@@ -1178,24 +1174,21 @@ def test_ariaRoleDescription_inline_browseMode():
 	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"Start  drawing  Our logo  End",
+		f"Start  Unlabeled graphic  Our logo. {IMG_DESC_MSG}  End",
 	)
 	# When reading the line by word,
 	# Both entering and exiting the custom role should be reported.
 	actualSpeech = _chrome.getSpeechAfterKey("control+rightArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"drawing  Our",
+		"Unlabeled graphic  Our",
 	)
 	actualSpeech = _chrome.getSpeechAfterKey("control+rightArrow")
+	# ICU word segmentation (the AUTO default) follows UAX#29, which treats the
+	# trailing period as its own word segment, so it is no longer read with "logo".
 	_asserts.strings_match(
 		actualSpeech,
-		"logo  out of drawing",
-	)
-	actualSpeech = _chrome.getSpeechAfterKey("control+rightArrow")
-	_asserts.strings_match(
-		actualSpeech,
-		"End",
+		"logo",
 	)
 
 
@@ -1262,14 +1255,14 @@ def test_ariaRoleDescription_inline_contentEditable():
 	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"Start  drawing  Our logo    End",
+		f"Start  Unlabeled graphic  Our logo. {IMG_DESC_MSG}    End",
 	)
 	# When reading the line by word,
 	# Both entering and exiting the custom role should be reported.
 	actualSpeech = _chrome.getSpeechAfterKey("control+rightArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"drawing  Our logo    out of drawing",
+		f"Unlabeled graphic  Our logo. {IMG_DESC_MSG}    out of Unlabeled graphic",
 	)
 	actualSpeech = _chrome.getSpeechAfterKey("control+rightArrow")
 	_asserts.strings_match(
@@ -1484,6 +1477,7 @@ def test_ariaDescription_sayAll():
 	Settings which may affect this:
 	- speech.reportObjectDescriptions default:True
 	- annotations.reportAriaDescription default:True
+	- speech.sayAllReadingUnit default:sentence
 	"""
 	_chrome.prepareChrome(_getAriaDescriptionSample())
 	actualSpeech = _chrome.getSpeechAfterKey("NVDA+downArrow")
@@ -1500,9 +1494,9 @@ def test_ariaDescription_sayAll():
 					[
 						"User nearby, Aaron",  # annotation
 						"Here is a sentence that is being edited by someone else.",  # span text
-						"Multiple can edit this.",  # bold paragraph text
 					],
 				),
+				"Multiple can edit this.",  # bold paragraph text
 				SPEECH_SEP.join(
 					[  # two space separator
 						"An element with a role, follow",  # paragraph text
@@ -1697,9 +1691,9 @@ def test_ensureNoBrowseModeDescription():
 	does not result in description in browse mode.
 	"""
 	_chrome.prepareChrome(
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
-				r"<button>something for focus</button>"
+				r"<button>something for focus</button>"  # noqa: ISC004
 				r'<a href="#" style="display:block" title="Cat">Apple</a>',
 				# second link to make testing second focus mode tab easier
 				r'<a href="#" style="display:block" title="Fish">Banana</a>',
@@ -2165,7 +2159,7 @@ def test_tableSayAllCommands():
 	actualSpeech = _chrome.getSpeechAfterKey("NVDA+control+alt+downArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				"B 2",
 				"row 3  column 1  through 2  A 3 plus B 3",
@@ -2184,7 +2178,7 @@ def test_tableSayAllCommands():
 	actualSpeech = _chrome.getSpeechAfterKey("NVDA+control+alt+rightArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				"B 2",
 				"row 1  through 2  column 3  C 1 plus C 2",
@@ -2209,7 +2203,7 @@ def test_tableSayAllCommands():
 	actualSpeech = _chrome.getSpeechAfterKey("NVDA+control+alt+rightArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				"A 3 plus B 3",
 				"column 3  C 3",
@@ -2234,7 +2228,7 @@ def test_tableSpeakAllCommands():
 	actualSpeech, actualBraille = _NvdaLib.getSpeechAndBrailleAfterKey("NVDA+control+alt+upArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				"row 1  B 1",
 				"row 2  B 2",
@@ -2258,7 +2252,7 @@ def test_tableSpeakAllCommands():
 	actualSpeech = _chrome.getSpeechAfterKey("NVDA+control+alt+leftArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				"column 1  A 2",
 				"column 2  B 2",
@@ -2296,7 +2290,7 @@ def test_tableSayAllAxisCachingForMergedCells():
 	actualSpeech = _chrome.getSpeechAfterKey("NVDA+control+alt+upArrow")
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				"row 1  column 4  D 1",
 				"row 2  column 3  D 2",
@@ -2693,7 +2687,7 @@ def test_styleNav():
 	By default these commands don't have assigned gestures,
 	so we will assign temporary gestures just for testing.
 	"""
-	spy: "NVDASpyLib" = _NvdaLib.getSpyLib()
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
 	spy.assignGesture(
 		"kb:s",
 		"browseMode",
@@ -2763,8 +2757,46 @@ def test_styleNav():
 	_asserts.strings_match(actualSpeech, "highlighted  highlighted")
 	actualSpeech, actualBraille = _NvdaLib.getSpeechAndBrailleAfterKey("shift+s")
 	_asserts.strings_match(actualSpeech, "No previous same style text")
-	actualSpeech, actualBraille = _NvdaLib.getSpeechAndBrailleAfterKey("s")
+	actualSpeech, actualBraille = _NvdaLib.getSpeechAndBrailleAfterKey("s")  # noqa: RUF059
 	_asserts.strings_match(actualSpeech, "No next same style text")
+
+
+def test_clickableNavigation() -> None:
+	"""Tests that unassigned quick navigation commands move between clickable elements."""
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
+	spy.assignGesture(
+		"kb:z",
+		"browseMode",
+		"BrowseModeTreeInterceptor",
+		"nextClickable",
+	)
+	spy.assignGesture(
+		"kb:shift+z",
+		"browseMode",
+		"BrowseModeTreeInterceptor",
+		"previousClickable",
+	)
+	# The navigation must use the clickable metadata even when its speech reporting is disabled.
+	spy.set_configValue(["documentFormatting", "reportClickable"], False)
+	_chrome.prepareChrome("""
+		<p>Before the custom controls</p>
+		<button>Semantic button</button>
+		<div tabindex="0" onclick="void(0)">First custom control</div>
+		<p>Between the custom controls</p>
+		<div tabindex="0" onclick="void(0)">Second custom control</div>
+		<p>After the custom controls</p>
+	""")
+
+	actualSpeech = _chrome.getSpeechAfterKey("z")
+	_asserts.strings_match(actualSpeech, "First custom control")
+	actualSpeech = _chrome.getSpeechAfterKey("z")
+	_asserts.strings_match(actualSpeech, "Second custom control")
+	actualSpeech = _chrome.getSpeechAfterKey("z")
+	_asserts.strings_match(actualSpeech, "no next clickable element")
+	actualSpeech = _chrome.getSpeechAfterKey("shift+z")
+	_asserts.strings_match(actualSpeech, "First custom control")
+	actualSpeech = _chrome.getSpeechAfterKey("shift+z")
+	_asserts.strings_match(actualSpeech, "no previous clickable element")
 
 
 def test_ariaErrorMessage():
@@ -2859,4 +2891,346 @@ def test_ariaErrorMessage():
 	_asserts.strings_match(
 		actualSpeech,
 		SPEECH_SEP.join(("Input 4", "edit", "invalid entry", "Error 4")),
+	)
+
+
+def _doTestReportLanguage(nvdaConfValues: "NVDASpyLib.NVDAConfMods"):
+	_chrome.prepareChrome(
+		"""
+		<p><span lang="fr">Cyrille</span> created this <span lang="unknown">test:</span> Let's mention <span lang="es-ES">Noelia</span> and <span lang="la">Leonem</span> in the same sentence.</p>
+	""",
+	)
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
+	spy.modifyNVDAConfig(nvdaConfValues)
+
+
+def test_reportLanguageDisabled():
+	_doTestReportLanguage(
+		nvdaConfValues=[
+			(AUTO_LANGUAGE_SWITCHING_KEY, True),
+			(AUTO_DIALECT_SWITCHING_KEY, False),
+			(REPORT_LANGUAGE_KEY, False),
+			(REPORT_NOT_SUPPORTED_LANGUAGE_KEY, "off"),
+		],
+	)
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		SPEECH_SEP.join(
+			(
+				"Cyrille",
+				"created this",
+				"test:",
+				"Let's mention",
+				"Noelia",
+				"and",
+				"Leonem",
+				"in the same sentence.",
+			),
+		),
+	)
+
+
+def test_reportLanguageEnabled():
+	_doTestReportLanguage(
+		nvdaConfValues=[
+			(AUTO_LANGUAGE_SWITCHING_KEY, False),
+			(AUTO_DIALECT_SWITCHING_KEY, False),
+			(REPORT_LANGUAGE_KEY, True),
+			(REPORT_NOT_SUPPORTED_LANGUAGE_KEY, "off"),
+		],
+	)
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		SPEECH_SEP.join(
+			(
+				spy.getLanguageDescription("fr"),
+				"Cyrille",
+				spy.getLanguageDescription("en"),
+				"created this",
+				"unknown",
+				"test:",
+				spy.getLanguageDescription("en"),
+				"Let's mention",
+				spy.getLanguageDescription("es_ES"),
+				"Noelia",
+				spy.getLanguageDescription("en"),
+				"and",
+				spy.getLanguageDescription("la"),
+				"Leonem",
+				spy.getLanguageDescription("en"),
+				"in the same sentence.",
+			),
+		),
+	)
+
+
+def test_reportLanguageWithoutDialects():
+	_doTestReportLanguage(
+		nvdaConfValues=[
+			(AUTO_LANGUAGE_SWITCHING_KEY, True),
+			(AUTO_DIALECT_SWITCHING_KEY, False),
+			(REPORT_LANGUAGE_KEY, True),
+			(REPORT_NOT_SUPPORTED_LANGUAGE_KEY, "off"),
+		],
+	)
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		SPEECH_SEP.join(
+			(
+				spy.getLanguageDescription("fr"),
+				"Cyrille",
+				spy.getLanguageDescription("en"),
+				"created this",
+				"unknown",
+				"test:",
+				spy.getLanguageDescription("en"),
+				"Let's mention",
+				spy.getLanguageDescription("es"),
+				"Noelia",
+				spy.getLanguageDescription("en"),
+				"and",
+				spy.getLanguageDescription("la"),
+				"Leonem",
+				spy.getLanguageDescription("en"),
+				"in the same sentence.",
+			),
+		),
+	)
+
+
+def test_reportNotSupportedLanguageWithoutOtherLanguages():
+	_doTestReportLanguage(
+		nvdaConfValues=[
+			(AUTO_LANGUAGE_SWITCHING_KEY, True),
+			(AUTO_DIALECT_SWITCHING_KEY, False),
+			(REPORT_LANGUAGE_KEY, False),
+			(REPORT_NOT_SUPPORTED_LANGUAGE_KEY, "speech"),
+		],
+	)
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		SPEECH_SEP.join(
+			(
+				"Cyrille",
+				"created this",
+				"unknown (not supported)",
+				"test:",
+				"Let's mention",
+				"Noelia",
+				"and",
+				"Leonem",
+				"in the same sentence.",
+			),
+		),
+	)
+
+
+def test_reportNotSupportedLanguageAndOtherLanguages():
+	_doTestReportLanguage(
+		nvdaConfValues=[
+			(AUTO_LANGUAGE_SWITCHING_KEY, True),
+			(AUTO_DIALECT_SWITCHING_KEY, False),
+			(REPORT_LANGUAGE_KEY, True),
+			(REPORT_NOT_SUPPORTED_LANGUAGE_KEY, "speech"),
+		],
+	)
+
+	spy: NVDASpyLib = _NvdaLib.getSpyLib()
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		SPEECH_SEP.join(
+			(
+				spy.getLanguageDescription("fr"),
+				"Cyrille",
+				spy.getLanguageDescription("en"),
+				"created this",
+				"unknown (not supported)",
+				"test:",
+				spy.getLanguageDescription("en"),
+				"Let's mention",
+				spy.getLanguageDescription("es"),
+				"Noelia",
+				spy.getLanguageDescription("en"),
+				"and",
+				spy.getLanguageDescription("la"),
+				"Leonem",
+				spy.getLanguageDescription("en"),
+				"in the same sentence.",
+			),
+		),
+	)
+
+
+# Constants for link destination tests
+REPORT_LINK_DESTINATION_GESTURE = "NVDA+k"
+
+
+def test_reportLinkDestination_plainLink():
+	"""Test NVDA+K reports the URL of a plain link."""
+	_chrome.prepareChrome('<p><a href="https://example.com/plain">Plain link</a></p>')
+
+	# Move to the first link line
+	actualSpeech = _NvdaLib.getSpeechAfterKey("downArrow")
+	_builtIn.should_contain(actualSpeech, "Plain link")
+
+	# Report link destination
+	actualSpeech = _NvdaLib.getSpeechAfterKey(REPORT_LINK_DESTINATION_GESTURE)
+	_asserts.strings_match(
+		actualSpeech,
+		"https: slash  slash example dot com slash plain",
+		message="NVDA+K should report the URL of a plain link",
+	)
+
+
+def test_reportLinkDestination_nestedStrong():
+	"""Test NVDA+K reports the URL when caret is on text inside a <strong> tag within a link (#17363)."""
+	_chrome.prepareChrome(
+		'<p><a href="https://example.com/strong"><strong>Bold link text</strong></a></p>',
+	)
+
+	# Move to the link
+	actualSpeech = _NvdaLib.getSpeechAfterKey("downArrow")
+	_builtIn.should_contain(actualSpeech, "Bold link text")
+
+	# Report link destination - this was broken before #17363 fix
+	actualSpeech = _chrome.getSpeechAfterKey("NVDA+k")
+	_asserts.strings_match(
+		actualSpeech,
+		"https: slash  slash example dot com slash strong",
+		message="NVDA+K should report the URL when caret is on nested <strong> inside a link",
+	)
+
+
+def test_reportLinkDestination_nestedEm():
+	"""Test NVDA+K reports the URL when caret is on text inside an <em> tag within a link (#17363)."""
+	_chrome.prepareChrome(
+		'<p><a href="https://example.com/em"><em>Italic link text</em></a></p>',
+	)
+
+	# Move to the link
+	actualSpeech = _NvdaLib.getSpeechAfterKey("downArrow")
+	_builtIn.should_contain(actualSpeech, "Italic link text")
+
+	# Report link destination
+	actualSpeech = _chrome.getSpeechAfterKey("NVDA+k")
+	_asserts.strings_match(
+		actualSpeech,
+		"https: slash  slash example dot com slash em",
+		message="NVDA+K should report the URL when caret is on nested <em> inside a link",
+	)
+
+
+def test_reportLinkDestination_deeplyNested():
+	"""Test NVDA+K reports the URL when caret is on deeply nested elements within a link (#17363)."""
+	_chrome.prepareChrome(
+		'<p><a href="https://example.com/nested"><strong><em><span>Deeply nested</span></em></strong></a></p>',
+	)
+
+	# Move to the link
+	actualSpeech = _NvdaLib.getSpeechAfterKey("downArrow")
+	_builtIn.should_contain(actualSpeech, "Deeply nested")
+
+	# Report link destination
+	actualSpeech = _chrome.getSpeechAfterKey("NVDA+k")
+	_asserts.strings_match(
+		actualSpeech,
+		"https: slash  slash example dot com slash nested",
+		message="NVDA+K should report the URL when caret is on deeply nested elements within a link",
+	)
+
+
+def test_reportLinkDestination_imageLink():
+	"""Test NVDA+K reports the URL of an image link (#14779)."""
+	_chrome.prepareChrome(
+		'<p><a href="https://example.com/image">'
+		'<img src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7" '
+		'alt="Test image"></a></p>',
+	)
+
+	# Move to the image link
+	actualSpeech = _NvdaLib.getSpeechAfterKey("downArrow")
+	_builtIn.should_contain(actualSpeech, "Test image")
+
+	# Report link destination
+	actualSpeech = _chrome.getSpeechAfterKey("NVDA+k")
+	_asserts.strings_match(
+		actualSpeech,
+		"https: slash  slash example dot com slash image",
+		message="NVDA+K should report the URL of an image link",
+	)
+
+
+def test_reportLinkDestination_notALink():
+	"""Test NVDA+K reports 'Not a link' when caret is not on a link."""
+	_chrome.prepareChrome("<p><strong>Not a link</strong></p>")
+
+	# Move to the non-link element
+	actualSpeech = _NvdaLib.getSpeechAfterKey("downArrow")
+	_builtIn.should_contain(actualSpeech, "Not a link")
+
+	# Report link destination - should say "Not a link"
+	actualSpeech = _NvdaLib.getSpeechAfterKey(REPORT_LINK_DESTINATION_GESTURE)
+	_asserts.strings_match(
+		actualSpeech,
+		"Not a link.",
+		message="NVDA+K should report 'Not a link' when caret is not on a link",
+	)
+
+
+def test_nativeSelectionMode_focusModeCaretMovement():
+	"""The caret can be moved in focus mode while native selection mode is enabled (#19075)"""
+	_chrome.prepareChrome(
+		r"""
+			<div contenteditable="true">
+				<p>before</p>
+				<ul>
+					<li>frogs</li>
+					<li>birds</li>
+				</ul>
+				<p>after</p>
+			</div>
+		""",
+	)
+	# Enable native selection mode
+	actualSpeech = _chrome.getSpeechAfterKey("NVDA+shift+f10")
+	_asserts.strings_match(
+		actualSpeech,
+		"Native app selection mode enabled",
+	)
+	# Force focus mode
+	actualSpeech = _chrome.getSpeechAfterKey("NVDA+space")
+	_asserts.strings_match(
+		actualSpeech,
+		"Focus mode",
+	)
+	# Tab into the contenteditable
+	actualSpeech = _chrome.getSpeechAfterKey("tab")
+	_asserts.strings_match(
+		actualSpeech,
+		"section  multi line  editable  before",
+	)
+	# DownArrow into the list.
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		"list  bullet  frogs",
+	)
+	# DownArrow to the second list item.
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		"bullet  birds",
+	)
+	# DownArrow out of the list.
+	actualSpeech = _chrome.getSpeechAfterKey("downArrow")
+	_asserts.strings_match(
+		actualSpeech,
+		"out of list  after",
 	)

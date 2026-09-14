@@ -1,0 +1,361 @@
+# A part of NonVisual Desktop Access (NVDA)
+# Copyright (C) 2025 NV Access Limited
+# This file is covered by the GNU General Public License.
+# See the file COPYING for more details.
+
+import unittest  # noqa: I001
+from unittest.mock import MagicMock, patch
+import _remoteClient.client as rcClient
+from _remoteClient.connectionInfo import ConnectionInfo, ConnectionMode
+from _remoteClient.protocol import RemoteMessageType
+from gui.message import ReturnCode
+from keyboardHandler import KeyboardInputGesture
+from utils.security import post_sessionLockStateChanged
+
+
+# Fake implementations for testing
+class FakeLocalMachine:
+	def __init__(self):
+		self.isMuted = False
+
+	def terminate(self):
+		pass
+
+	def setClipboardText(self, *a, **k): ...
+	def speak(self, *a, **k): ...
+	def cancelSpeech(self, *a, **k): ...
+	def pauseSpeech(self, *a, **k): ...
+	def beep(self, *a, **k): ...
+	def playWave(self, *a, **k): ...
+	def display(self, *a, **k): ...
+
+
+class FakeMenu:
+	def __init__(self):
+		self.muteItem = self.FakeMuteItem()
+
+	class FakeMuteItem:
+		def __init__(self):
+			self.checked = None
+
+		def Check(self, value):
+			self.checked = value
+
+	def handleConnected(self, *args, **kwargs): ...
+	def handleConnecting(self, *a, **k): ...
+
+
+class FakeTransport:
+	def __init__(self):
+		self.sent = []
+
+	@property
+	def connected(self):
+		return True
+
+	def send(self, messageType, **kwargs):
+		self.sent.append((messageType, kwargs))
+
+
+class FakeSession:
+	def __init__(self, url):
+		self.url = url
+
+	def getConnectionInfo(self):
+		class FakeConnectionInfo:
+			def getURLToConnect(_):  # type: ignore
+				return self.url
+
+		return FakeConnectionInfo()
+
+
+class FakeAPI:
+	clipData = "Fake clipboard text"
+	copied = None
+
+	@staticmethod
+	def getClipData():
+		return FakeAPI.clipData
+
+	@staticmethod
+	def copyToClip(text):
+		FakeAPI.copied = text
+
+
+class TestRemoteClient(unittest.TestCase):
+	def setUp(self):
+		import wx
+
+		if not wx.GetApp():
+			self.app = wx.App()
+		# Patch gui.mainFrame to a fake object so RemoteMenu can access sysTrayIcon.toolsMenu.
+		patcherMainFrame = patch("_remoteClient.client.gui.mainFrame")
+		self.addCleanup(patcherMainFrame.stop)
+		mockMainFrame = patcherMainFrame.start()
+		mockMainFrame.sysTrayIcon = MagicMock()
+		mockMainFrame.sysTrayIcon.toolsMenu = MagicMock()
+		self.client = rcClient.RemoteClient()
+		# Override localMachine and menu with fake implementations.
+		self.client.localMachine = FakeLocalMachine()
+		self.client.menu = FakeMenu()
+		# Patch ui.message to capture calls.
+		patcher = patch("_remoteClient.client.ui.message")
+		self.addCleanup(patcher.stop)
+		self.uiMessage = patcher.start()
+		delayedMessagePatcher = patch("_remoteClient.client.ui.delayedMessage")
+		self.addCleanup(delayedMessagePatcher.stop)
+		self.uiDelayedMessage = delayedMessagePatcher.start()
+		# Patch the API module to use our fake API.
+		patcherAPI = patch("_remoteClient.client.api", new=FakeAPI)
+		self.addCleanup(patcherAPI.stop)
+		patcherAPI.start()
+		FakeAPI.copied = None
+		patcherNvwave = patch("_remoteClient.cues.nvwave.playWaveFile", return_value=None)
+
+		self.addCleanup(patcherNvwave.stop)
+		patcherNvwave.start()
+
+	def tearDown(self):
+		self.client = None
+
+	@patch.object(rcClient.RemoteClient, "isConnected", lambda self: True)
+	def test_toggleMuteAsLeader(self):
+		# Initially, local machine should not be muted.
+		self.assertFalse(self.client.localMachine.isMuted)
+		# Toggle mute: should mute the local machine.
+		with patch.object(self.client, "leaderTransport", FakeTransport):
+			self.client.toggleMute()
+			self.assertTrue(self.client.localMachine.isMuted)
+			self.assertTrue(self.client.menu.muteItem.checked)
+			self.uiDelayedMessage.assert_called_once()
+			# Now toggle again: should unmute.
+			self.uiDelayedMessage.reset_mock()
+			self.client.toggleMute()
+			self.assertFalse(self.client.localMachine.isMuted)
+			self.assertFalse(self.client.menu.muteItem.checked)
+			self.uiDelayedMessage.assert_called_once()
+
+	@patch.object(rcClient.RemoteClient, "isConnected", lambda self: True)
+	def test_toggleMuteAsFollower(self):
+		# Initially, local machine should not be muted.
+		self.assertFalse(self.client.localMachine.isMuted)
+		with patch.object(self.client, "leaderTransport", None):
+			# Toggle mute: should have no effect
+			self.client.toggleMute()
+			self.assertFalse(self.client.localMachine.isMuted)
+			self.assertFalse(self.client.menu.muteItem.checked)
+
+	def test_pushClipboardNoConnection(self):
+		# Without any transport (neither follower nor leader), pushClipboard should warn.
+		self.client.followerTransport = None
+		self.client.leaderTransport = None
+		self.client.pushClipboard()
+		self.uiDelayedMessage.assert_called_with("Not connected")
+
+	def test_pushClipboardWithTransport(self):
+		# With a fake transport, pushClipboard should send the clipboard text.
+		fakeTransport = FakeTransport()
+		fakeSession = FakeSession("")
+		fakeSession.connectedClientsCount = 1
+		self.client.leaderTransport = fakeTransport
+		self.client.leaderSession = fakeSession
+		FakeAPI.clipData = "TestClipboard"
+		self.client.pushClipboard()
+		self.assertTrue(len(fakeTransport.sent) > 0)
+		messageType, kwargs = fakeTransport.sent[0]
+		self.assertEqual(messageType, RemoteMessageType.SET_CLIPBOARD_TEXT)
+		self.assertEqual(kwargs.get("text"), "TestClipboard")
+
+	def test_copyLinkNoSession(self):
+		# If there is no session, copyLink should warn the user.
+		self.client.leaderSession = None
+		self.client.followerSession = None
+		self.uiMessage.reset_mock()
+		self.client.copyLink()
+		self.uiDelayedMessage.assert_called_with("Not connected")
+
+	def test_copyLinkWithSession(self):
+		# With a fake session, copyLink should call api.copyToClip with the proper URL.
+		fakeSession = FakeSession("http://fake.url/connect")
+		self.client.leaderSession = fakeSession
+		FakeAPI.copied = None
+		self.client.copyLink()
+		self.assertEqual(FakeAPI.copied, "http://fake.url/connect")
+
+	def test_sendSasNoLeaderTransport(self):
+		# Without a leaderTransport, sendSAS should log an error.
+		self.client.leaderTransport = None
+		with patch("_remoteClient.client.log.debugWarning") as mockLogDebugWarning:
+			self.client.sendSAS()
+			mockLogDebugWarning.assert_called_once_with("No leader transport to send SAS")
+
+	def test_sendSasWithLeaderTransport(self):
+		# With a fake leaderTransport, sendSAS should forward the SEND_SAS message.
+		fakeTransport = FakeTransport()
+		self.client.leaderTransport = fakeTransport
+		self.client.sendSAS()
+		self.assertTrue(len(fakeTransport.sent) > 0)
+		messageType, _ = fakeTransport.sent[0]
+		self.assertEqual(messageType, RemoteMessageType.SEND_SAS)
+
+	def test_connectDispatch(self):
+		# Ensure that connect() dispatches to connectAsLeader or connectAsFollower based on connection mode.
+		fakeConnectAsLeader = MagicMock()
+		fakeConnectAsFollower = MagicMock()
+		self.client.connectAsLeader = fakeConnectAsLeader
+		self.client.connectAsFollower = fakeConnectAsFollower
+		connInfoLeader = ConnectionInfo(
+			hostname="localhost",
+			mode=ConnectionMode.LEADER,
+			key="abc",
+			port=1000,
+			insecure=False,
+		)
+		self.client.connect(connInfoLeader)
+		fakeConnectAsLeader.assert_called_once_with(connInfoLeader)
+		fakeConnectAsLeader.reset_mock()
+		connInfoFollower = ConnectionInfo(
+			hostname="localhost",
+			mode=ConnectionMode.FOLLOWER,
+			key="abc",
+			port=1000,
+			insecure=False,
+		)
+		self.client.connect(connInfoFollower)
+		fakeConnectAsFollower.assert_called_once_with(connInfoFollower)
+
+	def test_disconnect(self):
+		# Test disconnect with no active sessions.
+		self.client.leaderSession = None
+		self.client.followerSession = None
+		with patch("_remoteClient.client.log.debug") as mockLogDebug:
+			# `disconnect` is decorated with `alwaysCallAfter`, which causes it to be executed on the GUI thread.
+			# Unwrap it since we want it to run on this thread.
+			self.client.disconnect()
+			mockLogDebug.assert_called()
+		# Test disconnect with an active localControlServer.
+		fakeControl = MagicMock()
+		self.client.localControlServer = fakeControl
+		self.client.leaderSession = MagicMock()
+		self.client.followerSession = MagicMock()
+		with patch.object(rcClient.MessageDialog, "ShowModal", lambda *a, **k: ReturnCode.YES):
+			self.client.disconnect()
+		fakeControl.close.assert_called_once()
+
+	def test_lockWhileSendingKeys(self):
+		# the `onConnectedAsLeader` method is decorated with `alwaysCallAfter`.
+		# This causes issues here, so unwrap it.
+		with patch(
+			"_remoteClient.client.RemoteClient.onConnectedAsLeader",
+			rcClient.RemoteClient.onConnectedAsLeader.__wrapped__,
+		):
+			connInfo = ConnectionInfo(
+				hostname="localhost",
+				mode=ConnectionMode.LEADER,
+				key="abc",
+				port=4321,
+				insecure=False,
+			)
+			self.client.connect(connInfo)
+			self.client.leaderTransport.transportConnected.notify()
+			# Explicitly set to connected and act as though we have a follower.
+			# For this test, we don't need to run the TCP code,
+			# nor do we need to actually have a connected follower.
+			# However, these are prerequisites of being able to control a remote computer,
+			# so fake it.
+			self.client.leaderTransport.connected = True
+			self.client.leaderSession.followers = [""]
+			self.assertFalse(self.client.sendingKeys, "We should initially not be sending keys")
+			self.client.toggleRemoteKeyControl(KeyboardInputGesture.fromName("NVDA+alt+tab"))
+			self.assertTrue(self.client.sendingKeys, "We just explicitly switched to sending keys")
+			post_sessionLockStateChanged.notify(isNowLocked=True)
+			self.assertFalse(
+				self.client.sendingKeys,
+				"We should stop sending keys when switching to the lockscreen",
+			)
+			post_sessionLockStateChanged.notify(isNowLocked=False)
+			self.assertTrue(
+				self.client.sendingKeys,
+				"We should resume sending keys after returning from the lock screen",
+			)
+			# When returning control, Remote Access queries `inputCore.manager`
+			# since NVDA isn't running, this is `None`,
+			# but we don't care about these checks in this case.
+			# Thus, simply patch it out.
+			with patch("inputCore.manager"):
+				self.client.toggleRemoteKeyControl(KeyboardInputGesture.fromName("NVDA+alt+tab"))
+			self.assertFalse(self.client.sendingKeys, "We just explicitly stopped sending keys")
+			post_sessionLockStateChanged.notify(isNowLocked=True)
+			self.assertFalse(
+				self.client.sendingKeys,
+				"The session locking shouldn't do anything if we weren't sending keys",
+			)
+			post_sessionLockStateChanged.notify(isNowLocked=False)
+			self.assertFalse(
+				self.client.sendingKeys,
+				"We weren't sending keys before the latest session lock, so we shouldn't start when it's unlocked",
+			)
+
+	def test_onConnectAsFollowerFailedAnnouncesOnlyOnce(self):
+		# The `onConnectAsFollowerFailed` method is decorated with `alwaysCallAfter`.
+		# This causes issues here, so unwrap it.
+		onConnectAsFollowerFailed = rcClient.RemoteClient.onConnectAsFollowerFailed.__wrapped__
+		fakeTransport = FakeTransport()
+		fakeTransport.successfulConnects = 0
+		fakeTransport.address = ("localhost", 6837)
+		self.client.followerTransport = fakeTransport
+		onConnectAsFollowerFailed(self.client)
+		self.uiDelayedMessage.assert_called_once()
+		# The transport retries roughly every 5 seconds; subsequent failures must not announce again.
+		onConnectAsFollowerFailed(self.client)
+		onConnectAsFollowerFailed(self.client)
+		self.uiDelayedMessage.assert_called_once()
+
+	def test_onConnectAsFollowerFailedAfterSuccessfulConnect(self):
+		# Failures of a transport which has connected before are reconnection attempts,
+		# not initial connection failures, so they should not be announced.
+		onConnectAsFollowerFailed = rcClient.RemoteClient.onConnectAsFollowerFailed.__wrapped__
+		fakeTransport = FakeTransport()
+		fakeTransport.successfulConnects = 1
+		fakeTransport.address = ("localhost", 6837)
+		self.client.followerTransport = fakeTransport
+		onConnectAsFollowerFailed(self.client)
+		self.uiDelayedMessage.assert_not_called()
+
+	def test_onConnectAsFollowerFailedWithoutTransport(self):
+		# A late notification after the transport has been torn down should be a no-op.
+		onConnectAsFollowerFailed = rcClient.RemoteClient.onConnectAsFollowerFailed.__wrapped__
+		self.client.followerTransport = None
+		onConnectAsFollowerFailed(self.client)
+		self.uiDelayedMessage.assert_not_called()
+
+	def test_onConnectAsFollowerFailedForANewConnection(self):
+		# Starting a new follower connection should allow a failure to be announced again,
+		# even if the failure of an earlier connection has already been announced.
+		onConnectAsFollowerFailed = rcClient.RemoteClient.onConnectAsFollowerFailed.__wrapped__
+		fakeTransport = FakeTransport()
+		fakeTransport.successfulConnects = 0
+		fakeTransport.address = ("localhost", 6837)
+		self.client.followerTransport = fakeTransport
+		onConnectAsFollowerFailed(self.client)
+		self.uiDelayedMessage.assert_called_once()
+		self.uiDelayedMessage.reset_mock()
+		connInfo = ConnectionInfo(
+			hostname="localhost",
+			mode=ConnectionMode.FOLLOWER,
+			key="abc",
+			port=4321,
+			insecure=False,
+		)
+		# A real transport and session would start a connector thread
+		# and register handlers on global extension points,
+		# neither of which is needed to test that starting a connection resets the announcement.
+		with patch("_remoteClient.client.RelayTransport"), patch("_remoteClient.client.FollowerSession"):
+			self.client.connect(connInfo)
+		self.client.followerTransport = fakeTransport
+		onConnectAsFollowerFailed(self.client)
+		self.uiDelayedMessage.assert_called_once()
+
+
+if __name__ == "__main__":
+	unittest.main()

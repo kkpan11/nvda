@@ -1,16 +1,15 @@
-# -*- coding: UTF-8 -*-
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2023 NV Access Limited, Joseph Lee, Łukasz Golonka, Julien Cochuyt
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
+# Copyright (C) 2006-2026 NV Access Limited, Joseph Lee, Łukasz Golonka, Julien Cochuyt
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-"""App module for Windows Explorer (aka Windows shell and renamed to File Explorer in Windows 8).
+"""App module for File Explorer (aka Windows shell, formerly Windows Explorer).
 Provides workarounds for controls such as identifying Start button, notification area and others.
 """
 
-from comtypes import COMError
+from comtypes import COMError  # noqa: I001
 import time
-from typing import Callable
+from collections.abc import Callable
 import appModuleHandler
 import controlTypes
 import winUser
@@ -18,6 +17,7 @@ import winVersion
 import api
 import speech
 import braille
+import braille.regions.properties
 import eventHandler
 import mouseHandler
 from NVDAObjects import NVDAObject
@@ -26,7 +26,9 @@ from NVDAObjects.UIA import UIA
 from NVDAObjects.behaviors import ToolTip
 from NVDAObjects.window.edit import RichEdit50, Edit
 import config
+import ui
 from winAPI.types import HWNDValT
+from comInterfaces import UIAutomationClient
 
 
 # Suppress incorrect Win 10 Task switching window focus
@@ -40,21 +42,12 @@ class MultitaskingViewFrameListItem(UIA):
 		if winUser.getAsyncKeyState(winUser.VK_MENU) & 32768:
 			return api.getDesktopObject()
 		else:
-			return super(MultitaskingViewFrameListItem, self).container
+			return super().container
 
 
-# Support for Win8 start screen search suggestions.
-class SuggestionListItem(UIA):
-	def event_UIA_elementSelected(self):
-		speech.cancelSpeech()
-		if api.setNavigatorObject(self, isFocus=True):
-			self.reportFocus()
-			super().event_UIA_elementSelected()
-
-
-# Windows 8 hack: Class to disable incorrect focus on windows 8 search box
-# (containing the already correctly focused edit field)
 class SearchBoxClient(IAccessible):
+	# #20021: File Explorer can fire a redundant MSAA focus event on the search band pane
+	# immediately after the UIA SearchEditBox gains focus.
 	shouldAllowIAccessibleFocusEvent = False
 
 
@@ -70,7 +63,7 @@ class SysListView32EmittingDuplicateFocusEvents(IAccessible):
 		if not res:
 			return False
 		focus = eventHandler.lastQueuedFocusObject
-		if type(focus) is not type(self) or (
+		if type(focus) is not type(self) or (  # noqa: SIM103
 			self.event_windowHandle,
 			self.event_objectID,
 			self.event_childID,
@@ -86,7 +79,7 @@ class NotificationArea(IAccessible):
 
 	def event_gainFocus(self):
 		NotificationArea.lastKnownLocation = self.location
-		if mouseHandler.lastMouseEventTime < time.time() - 0.2:
+		if mouseHandler.lastMouseEventTime < time.time() - 0.2:  # noqa: SIM102
 			# This focus change was not caused by a mouse event.
 			# If the mouse is on another systray control, the notification area toolbar will rudely
 			# bounce the focus back to the object under the mouse after a brief pause.
@@ -117,7 +110,7 @@ class NotificationArea(IAccessible):
 
 		if eventHandler.isPendingEvents("gainFocus"):
 			return
-		super(NotificationArea, self).event_gainFocus()
+		super().event_gainFocus()
 
 
 class ExplorerToolTip(ToolTip):
@@ -151,7 +144,7 @@ class ExplorerToolTip(ToolTip):
 			return True
 
 		# Report is the next are different
-		if focus.name != self.name:
+		if focus.name != self.name:  # noqa: SIM103
 			return True
 
 		# Do not report otherwise
@@ -160,47 +153,6 @@ class ExplorerToolTip(ToolTip):
 	def event_show(self):
 		if self.shouldReport():
 			super().event_show()
-
-
-class GridTileElement(UIA):
-	role = controlTypes.Role.TABLECELL
-
-	def _get_description(self):
-		name = self.name
-		descriptionStrings = []
-		for child in self.children:
-			description = child.basicText
-			if not description or description == name:
-				continue
-			descriptionStrings.append(description)
-		return " ".join(descriptionStrings)
-		return description
-
-
-class GridListTileElement(UIA):
-	role = controlTypes.Role.TABLECELL
-	description = None
-
-
-class GridGroup(UIA):
-	"""A group in the Windows 8 Start Menu."""
-
-	presentationType = UIA.presType_content
-
-	# Normally the name is the first tile which is rather redundant
-	# However some groups have custom header text which should be read instead
-	def _get_name(self):
-		child = self.firstChild
-		if isinstance(child, UIA):
-			if child.UIAAutomationId == "GridListGroupHeader":
-				return child.name
-
-
-class ImmersiveLauncher(UIA):
-	# When the Windows 8 start screen opens, focus correctly goes to the first tile,
-	# but then incorrectly back to the root of the window.
-	# Ignore focus events on this object.
-	shouldAllowUIAFocusEvent = False
 
 
 class StartButton(IAccessible):
@@ -212,7 +164,7 @@ class StartButton(IAccessible):
 	def _get_states(self):
 		# #5178: Selection announcement should be suppressed.
 		# Borrowed from Mozilla objects in NVDAObjects/IAccessible/Mozilla.py.
-		states = super(StartButton, self).states
+		states = super().states
 		states.discard(controlTypes.State.SELECTED)
 		return states
 
@@ -227,7 +179,7 @@ class UIProperty(UIA):
 	"""
 
 	def _get_value(self):
-		value = super(UIProperty, self).value
+		value = super().value
 		if value is None:
 			return value
 		return value.replace(CHAR_LTR_MARK, "").replace(CHAR_RTL_MARK, "")
@@ -239,7 +191,7 @@ class ReadOnlyEditBox(Edit):
 	"""
 
 	def _get_windowText(self):
-		windowText = super(ReadOnlyEditBox, self).windowText
+		windowText = super().windowText
 		if windowText is not None:
 			return windowText.replace(CHAR_LTR_MARK, "").replace(CHAR_RTL_MARK, "")
 		return windowText
@@ -260,10 +212,23 @@ class WorkerW(IAccessible):
 
 
 class AppModule(appModuleHandler.AppModule):
+	def _setProductInfo(self) -> None:
+		# #19802: customized for File Explorer as product version is wrong (looks at explorer.exe.mui).
+		if not self.processHandle:
+			raise RuntimeError("processHandle is 0")
+		# Even though product version is wrong, use product name supplied by File Explorer.
+		productInfo = self._getExecutableFileInfo()
+		self.productName = productInfo[0]
+		# NVDA claims executable name is "explorer.exe" when in fact it is "explorer.exe.mui".
+		# This means file information would not be accurate, returning the base Windows build.revision.
+		# Therefore, set product version to Windows major.minor.build.revision.
+		winVer = winVersion.getWinVer()
+		self.productVersion = f"{winVer.major}.{winVer.minor}.{winVer.build}.{winVer.revision}"
+
 	# C901 'chooseNVDAObjectOverlayClasses' is too complex
 	# Note: when working on chooseNVDAObjectOverlayClasses, look for opportunities to simplify
 	# and move logic out into smaller helper functions.
-	def chooseNVDAObjectOverlayClasses(self, obj, clsList):  # NOQA: C901
+	def chooseNVDAObjectOverlayClasses(self, obj, clsList):
 		windowClass = obj.windowClassName
 		role = obj.role
 
@@ -324,18 +289,8 @@ class AppModule(appModuleHandler.AppModule):
 
 		if isinstance(obj, UIA):
 			uiaClassName = obj.UIAElement.cachedClassName
-			if uiaClassName == "GridTileElement":
-				clsList.insert(0, GridTileElement)
-			elif uiaClassName == "GridListTileElement":
-				clsList.insert(0, GridListTileElement)
-			elif uiaClassName == "GridGroup":
-				clsList.insert(0, GridGroup)
-			elif uiaClassName == "ImmersiveLauncher" and role == controlTypes.Role.PANE:
-				clsList.insert(0, ImmersiveLauncher)
-			elif uiaClassName == "ListViewItem" and obj.UIAAutomationId.startswith("Suggestion_"):
-				clsList.insert(0, SuggestionListItem)
 			# Multitasking view frame window
-			elif (
+			if (
 				# Windows 10 and earlier
 				(uiaClassName == "MultitaskingViewFrame" and role == controlTypes.Role.WINDOW)
 				# Windows 11 where a pane window receives focus when switching tasks
@@ -504,7 +459,7 @@ class AppModule(appModuleHandler.AppModule):
 		# letting NVDA announce shell elements when navigating with mouse and/or touch,
 		# notably when interacting with windows labeled "DesktopWindowXamlSource".
 		# WORKAROUND UNTIL A PERMANENT FIX IS FOUND ACROSS APPS
-		if (
+		if (  # noqa: SIM103
 			currentWinVer >= winVersion.WIN11
 			# Traverse parents until arriving at the top-level window with the below class names.
 			# This is more so for the shell root (first class name), and for others, class name check would work
@@ -552,11 +507,45 @@ class AppModule(appModuleHandler.AppModule):
 		):
 			speech.speakObject(obj, reason=controlTypes.OutputReason.FOCUS)
 			braille.handler.message(
-				braille.getPropertiesBraille(
+				braille.regions.properties.getPropertiesBraille(
 					name=obj.name,
 					role=obj.role,
 					states=obj.states,
 					positionInfo=obj.positionInfo,
 				),
 			)
+		nextHandler()
+
+	def shouldProcessUIANotificationEvent(
+		self,
+		sender: UIAutomationClient.IUIAutomationElement,
+		notificationKind: int | None = None,
+		notificationProcessing: int | None = None,
+		displayString: str = "",
+		activityId: str = "",
+	) -> bool:
+		if activityId == "Windows.Shell.SnapComponent.SnapHotKeyResults":
+			return True
+		return super().shouldProcessUIANotificationEvent(
+			sender,
+			notificationKind=notificationKind,
+			notificationProcessing=notificationProcessing,
+			displayString=displayString,
+			activityId=activityId,
+		)
+
+	def event_UIA_notification(
+		self,
+		obj: NVDAObject,
+		nextHandler: Callable[[], None],
+		notificationKind: int | None = None,
+		notificationProcessing: int | None = None,
+		displayString: str = "",
+		activityId: str = "",
+	) -> None:
+		# #17841: announce window states across apps (Windows 11 24H2 and later).
+		# These messages come from a File Explorer (shell) element and there is no native window handle.
+		if activityId == "Windows.Shell.SnapComponent.SnapHotKeyResults":
+			ui.message(displayString)
+			return
 		nextHandler()

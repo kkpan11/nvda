@@ -1,5 +1,5 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2017-2023 NV Access Limited, James Teh, Leonard de RUijter
+# Copyright (C) 2017-2025 NV Access Limited, James Teh, Leonard de Ruijter, Cyrille Bougot, Cary-rowen, hwf1324
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
@@ -10,7 +10,8 @@ and present the result to the user so they can read it with cursor keys, etc.
 NVDA scripts or GUI call the L{recognizeNavigatorObject} function with the recognizer they wish to use.
 """
 
-from typing import Optional, Union
+import ctypes  # noqa: I001
+from typing import TYPE_CHECKING
 import api
 import ui
 import screenBitmap
@@ -20,11 +21,75 @@ import controlTypes
 import browseMode
 import cursorManager
 import eventHandler
+import exceptions
 import textInfos
 from logHandler import log
+from speech import sayAll
 import queueHandler
 import core
+from scriptHandler import script
 from . import RecogImageInfo, ContentRecognizer, RecognitionResult, onRecognizeResultCallbackT
+
+if TYPE_CHECKING:
+	import inputCore
+
+
+def _isScreenCurtainActive() -> bool:
+	from screenCurtain import screenCurtain
+
+	return screenCurtain is not None and screenCurtain.enabled
+
+
+def _isMagnifierActive() -> bool:
+	import _magnifier
+
+	return _magnifier.isActive()
+
+
+def _shouldUseWgcCapture() -> bool:
+	return _isScreenCurtainActive() or (_isMagnifierActive() and _isWgcCaptureSupported())
+
+
+def _isWgcCaptureSupported() -> bool:
+	from . import _wgcCapture
+
+	return _wgcCapture.isSupported()
+
+
+def _captureWithGdi(imageInfo: RecogImageInfo) -> ctypes.Array:
+	sb = screenBitmap.ScreenBitmap(imageInfo.recogWidth, imageInfo.recogHeight)
+	return sb.captureImage(
+		imageInfo.screenLeft,
+		imageInfo.screenTop,
+		imageInfo.screenWidth,
+		imageInfo.screenHeight,
+	)
+
+
+def _captureWithWgc(imageInfo: RecogImageInfo) -> ctypes.Array:
+	from . import _wgcCapture
+
+	return _wgcCapture.captureImage(imageInfo)
+
+
+def _shouldBlockScreenCurtainEnable(focusObj: NVDAObjects.NVDAObject) -> bool:
+	"""Return whether enabling Screen Curtain should be blocked for an active recognition result."""
+	return (
+		isinstance(focusObj, RefreshableRecogResultNVDAObject)
+		and focusObj.recognizer.allowAutoRefresh
+		and not _isWgcCaptureSupported()
+	)
+
+
+def _captureImage(imageInfo: RecogImageInfo) -> ctypes.Array:
+	if _shouldUseWgcCapture():
+		try:
+			return _captureWithWgc(imageInfo)
+		except RuntimeError:
+			if _isScreenCurtainActive():
+				raise
+			log.debugWarning("Windows Graphics Capture failed; falling back to GDI.", exc_info=True)
+	return _captureWithGdi(imageInfo)
 
 
 class RecogResultNVDAObject(cursorManager.CursorManager, NVDAObjects.window.Window):
@@ -41,6 +106,7 @@ class RecogResultNVDAObject(cursorManager.CursorManager, NVDAObjects.window.Wind
 
 	def __init__(self, result=None, obj=None):
 		self.parent = parent = api.getFocusObject()
+		self._shouldSayAllOnFirstFocus = False
 		self.result = result
 		if result:
 			self._selection = self.makeTextInfo(textInfos.POSITION_FIRST)
@@ -100,7 +166,7 @@ class RecogResultNVDAObject(cursorManager.CursorManager, NVDAObjects.window.Wind
 		# Translators: Reported when a user tries to use a find command when it isn't supported.
 		ui.message(_("Not supported in this document"))
 
-	__gestures = {
+	__gestures = {  # noqa: RUF012
 		"kb:enter": "activatePosition",
 		"kb:space": "activatePosition",
 		"kb:escape": "exit",
@@ -109,14 +175,14 @@ class RecogResultNVDAObject(cursorManager.CursorManager, NVDAObjects.window.Wind
 
 class RefreshableRecogResultNVDAObject(RecogResultNVDAObject, LiveText):
 	"""NVDA Object that itself is responsible for fetching the recognizition result.
-	It is also able to refresh the result at intervals whenthe recognizer supports it.
+	It is also able to refresh the result at intervals or on demand when the recognizer supports it.
 	"""
 
 	def __init__(
 		self,
 		recognizer: ContentRecognizer,
 		imageInfo: RecogImageInfo,
-		obj: Optional[NVDAObjects.NVDAObject] = None,
+		obj: NVDAObjects.NVDAObject | None = None,
 	):
 		self.recognizer = recognizer
 		self.imageInfo = imageInfo
@@ -130,16 +196,14 @@ class RefreshableRecogResultNVDAObject(RecogResultNVDAObject, LiveText):
 			# shouldn't recognize again.
 			return
 		imgInfo = self.imageInfo
-		sb = screenBitmap.ScreenBitmap(imgInfo.recogWidth, imgInfo.recogHeight)
-		pixels = sb.captureImage(
-			imgInfo.screenLeft,
-			imgInfo.screenTop,
-			imgInfo.screenWidth,
-			imgInfo.screenHeight,
-		)
+		try:
+			pixels = _captureImage(imgInfo)
+		except (RuntimeError, exceptions.CallCancelled) as e:
+			onResult(e)
+			return
 		self.recognizer.recognize(pixels, self.imageInfo, onResult)
 
-	def _onFirstResult(self, result: Union[RecognitionResult, Exception]):
+	def _onFirstResult(self, result: RecognitionResult | Exception):
 		global _activeRecog
 		_activeRecog = None
 		# This might get called from a background thread, so any UI calls must be queued to the main thread.
@@ -156,23 +220,38 @@ class RefreshableRecogResultNVDAObject(RecogResultNVDAObject, LiveText):
 		self._selection = self.makeTextInfo(textInfos.POSITION_FIRST)
 		# This method queues an event to the main thread.
 		self.setFocus()
+		if self.recognizer.autoSayAllOnResult:
+			self._shouldSayAllOnFirstFocus = True
 		if self.recognizer.allowAutoRefresh:
 			self._scheduleRecognize()
 
 	def _scheduleRecognize(self):
 		core.callLater(self.recognizer.autoRefreshInterval, self._recognize, self._onResult)
 
-	def _onResult(self, result: Union[RecognitionResult, Exception]):
+	@script(
+		# Translators: Describes a command.
+		description=_("Refresh the recognition result"),
+		gesture="kb:NVDA+f5",
+	)
+	def script_refreshBuffer(self, gesture: "inputCore.InputGesture") -> None:
+		if self.recognizer.allowAutoRefresh:
+			# Translators: Reported when a manual update of a content recognition result (e.g. OCR result) is
+			# requested, but the content is already updated automatically.
+			ui.message(_("The result of content recognition is already automatically updated"))
+			return
+		core.callLater(0, self._recognize, self._onResult)
+
+	def _onResult(self, result: RecognitionResult | Exception):
 		if not self.hasFocus:
 			# The user has dismissed the recognition result.
 			return
 		if isinstance(result, Exception):
-			log.error(f"Subsequent recognition failed: {result}")
+			log.error(f"Refresh recognition failed: {result}")
 			queueHandler.queueFunction(
 				queueHandler.eventQueue,
 				ui.message,
 				# Translators: Reported when recognition (e.g. OCR) fails during automatic refresh.
-				_("Automatic refresh of recognition result failed"),
+				_("Refresh of recognition result failed"),
 			)
 			self.stopMonitoring()
 			return
@@ -182,10 +261,14 @@ class RefreshableRecogResultNVDAObject(RecogResultNVDAObject, LiveText):
 		self.selection = self.makeTextInfo(self._selection.bookmark)
 		# Tell LiveText that our text has changed.
 		self.event_textChange()
-		self._scheduleRecognize()
+		if self.recognizer.allowAutoRefresh:
+			self._scheduleRecognize()
 
 	def event_gainFocus(self):
 		super().event_gainFocus()
+		if self._shouldSayAllOnFirstFocus:
+			self._shouldSayAllOnFirstFocus = False
+			sayAll.SayAllHandler.readText(sayAll.CURSOR.CARET)
 		if self.recognizer.allowAutoRefresh:
 			# Make LiveText watch for and report new text.
 			self.startMonitoring()
@@ -201,6 +284,8 @@ class RefreshableRecogResultNVDAObject(RecogResultNVDAObject, LiveText):
 
 #: Keeps track of the recognition in progress, if any.
 _activeRecog = None
+# Register the fake NVDA object class.
+api.fakeNVDAObjectClasses.add(RecogResultNVDAObject)
 
 
 def recognizeNavigatorObject(recognizer: ContentRecognizer):
@@ -223,7 +308,7 @@ def recognizeNavigatorObject(recognizer: ContentRecognizer):
 	try:
 		left, top, width, height = nav.location
 	except TypeError:
-		log.debugWarning("Object returned location %r" % nav.location)
+		log.debugWarning("Object returned location %r" % nav.location)  # noqa: UP031
 		ui.message(notVisibleMsg)
 		return
 	if not recognizer.validateCaptureBounds(nav.location):
@@ -232,6 +317,16 @@ def recognizeNavigatorObject(recognizer: ContentRecognizer):
 		imgInfo = RecogImageInfo.createFromRecognizer(left, top, width, height, recognizer)
 	except ValueError:
 		ui.message(notVisibleMsg)
+		return
+	if _isScreenCurtainActive() and not _isWgcCaptureSupported():
+		ui.message(
+			_(
+				# Translators: Reported when content recognition (e.g. OCR) is attempted while Screen Curtain
+				# is enabled, but the system does not support the required screen capture API.
+				"Content recognition is unavailable while Screen Curtain is enabled on this system. "
+				"Please disable Screen Curtain and try again.",
+			),
+		)
 		return
 	if _activeRecog:
 		_activeRecog.recognizer.cancel()

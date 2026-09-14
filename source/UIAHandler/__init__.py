@@ -1,14 +1,11 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2008-2023 NV Access Limited, Joseph Lee, Babbage B.V., Leonard de Ruijter, Bill Dengler
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
+# Copyright (C) 2008-2026 NV Access Limited, Joseph Lee, Babbage B.V., Leonard de Ruijter, Bill Dengler
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-from typing import Optional
-import ctypes
+import ctypes  # noqa: I001
 import ctypes.wintypes
 from ctypes import (
-	oledll,
-	windll,
 	POINTER,
 	CFUNCTYPE,  # noqa: F401
 	c_voidp,  # noqa: F401
@@ -37,18 +34,24 @@ import api
 import appModuleHandler
 import controlTypes
 import globalVars
+from winBindings import user32
+import winBindings.ole32
+import winBindings.kernel32
 import winKernel
 import winUser
 import winVersion
 import eventHandler
+import exceptions
+import watchdog
 from logHandler import log
+import winBindings.uiAutomationCore
 from . import utils
 from comInterfaces import UIAutomationClient as UIA
 
 # F403: unable to detect undefined names
-from comInterfaces.UIAutomationClient import *  # noqa:  F403
+from comInterfaces.UIAutomationClient import *
 import textInfos
-from typing import Dict
+from typing import Dict  # noqa: F401, UP035
 from queue import Queue
 import aria
 import NVDAHelper
@@ -67,7 +70,12 @@ baseCachePropertyIDs = {
 	UIA.UIA_IsControlElementPropertyId,
 	UIA.UIA_NamePropertyId,
 	UIA.UIA_LocalizedControlTypePropertyId,
+	UIA.UIA_HasKeyboardFocusPropertyId,
 }
+"""UIA property IDs included in the handler's base cache request.
+The base cache request is attached to all event handler registrations and to the base tree walker,
+so event senders and elements fetched through them carry these properties in their element cache.
+"""
 
 #: The window class name for Microsoft Word documents.
 # Microsoft Word's UI Automation implementation
@@ -88,6 +96,14 @@ WDAG_WINDOW_CLASS_NAME = "RAIL_WINDOW"
 goodUIAWindowClassNames = (
 	# A WDAG (Windows Defender Application Guard) Window is always native UIA, even if it doesn't report as such.
 	"RAIL_WINDOW",
+	# #17407, #17771: WinUI 3 top-level pane window class name.
+	"Microsoft.UI.Content.DesktopChildSiteBridge",
+	# #20448: Windows Terminal hosts its content in a XAML island whose child window
+	# (Windows.UI.Composition.DesktopWindowContentBridge) is the one that actually
+	# exposes a UIA server-side provider.
+	# However, the top-level CASCADIA_HOSTING_WINDOW_CLASS window
+	# reports no server-side provider.
+	"CASCADIA_HOSTING_WINDOW_CLASS",
 )
 
 badUIAWindowClassNames = (
@@ -97,6 +113,7 @@ badUIAWindowClassNames = (
 	"WuDuiListView",
 	"ComboBox",
 	"msctls_progress32",
+	"msctls_trackbar32",
 	"Edit",
 	"CommonPlacesWrapperWndClass",
 	"SysMonthCal32",
@@ -107,6 +124,12 @@ badUIAWindowClassNames = (
 	"Button",
 	# #8944: The Foxit UIA implementation is incomplete and should not be used for now.
 	"FoxitDocWnd",
+	# Mozilla Gecko (Firefox, etc.) has a native UIA implementation. However, IA2
+	# is still better for web content in screen readers for now.
+	"MozillaWindowClass",
+	"MozillaDropShadowWindowClass",
+	"MozillaDialogClass",
+	"MozillaContentWindowClass",
 )
 
 # #8405: used to detect UIA dialogs prior to Windows 10 RS5.
@@ -129,11 +152,10 @@ textChangeUIAClassNames = (
 
 windowsTerminalUIAClassNames = (
 	"TermControl",
-	"TermControl2",
 	"WPFTermControl",
 )
 
-NVDAUnitsToUIAUnits: Dict[str, int] = {
+NVDAUnitsToUIAUnits: dict[str, int] = {
 	textInfos.UNIT_CHARACTER: UIA.TextUnit_Character,
 	textInfos.UNIT_WORD: UIA.TextUnit_Word,
 	textInfos.UNIT_LINE: UIA.TextUnit_Line,
@@ -144,49 +166,59 @@ NVDAUnitsToUIAUnits: Dict[str, int] = {
 	textInfos.UNIT_FORMATFIELD: UIA.TextUnit_Format,
 }
 
+
+def getUIAUnitFromNVDAUnit(unit: str) -> int:
+	"""Translate an NVDA text unit constant to its UIA ``TextUnit`` equivalent.
+	:raises NotImplementedError: if UIA has no equivalent unit.
+	"""
+	if (UIAUnit := NVDAUnitsToUIAUnits.get(unit)) is None:
+		raise NotImplementedError(f"UIA does not support the {unit!r} text unit")
+	return UIAUnit
+
+
 UIAControlTypesToNVDARoles = {
-	UIA_ButtonControlTypeId: controlTypes.Role.BUTTON,  # noqa: F405
-	UIA_CalendarControlTypeId: controlTypes.Role.CALENDAR,  # noqa: F405
-	UIA_CheckBoxControlTypeId: controlTypes.Role.CHECKBOX,  # noqa: F405
-	UIA_ComboBoxControlTypeId: controlTypes.Role.COMBOBOX,  # noqa: F405
-	UIA_EditControlTypeId: controlTypes.Role.EDITABLETEXT,  # noqa: F405
-	UIA_HyperlinkControlTypeId: controlTypes.Role.LINK,  # noqa: F405
-	UIA_ImageControlTypeId: controlTypes.Role.GRAPHIC,  # noqa: F405
-	UIA_ListItemControlTypeId: controlTypes.Role.LISTITEM,  # noqa: F405
-	UIA_ListControlTypeId: controlTypes.Role.LIST,  # noqa: F405
-	UIA_MenuControlTypeId: controlTypes.Role.POPUPMENU,  # noqa: F405
-	UIA_MenuBarControlTypeId: controlTypes.Role.MENUBAR,  # noqa: F405
-	UIA_MenuItemControlTypeId: controlTypes.Role.MENUITEM,  # noqa: F405
-	UIA_ProgressBarControlTypeId: controlTypes.Role.PROGRESSBAR,  # noqa: F405
-	UIA_RadioButtonControlTypeId: controlTypes.Role.RADIOBUTTON,  # noqa: F405
-	UIA_ScrollBarControlTypeId: controlTypes.Role.SCROLLBAR,  # noqa: F405
-	UIA_SliderControlTypeId: controlTypes.Role.SLIDER,  # noqa: F405
-	UIA_SpinnerControlTypeId: controlTypes.Role.SPINBUTTON,  # noqa: F405
-	UIA_StatusBarControlTypeId: controlTypes.Role.STATUSBAR,  # noqa: F405
-	UIA_TabControlTypeId: controlTypes.Role.TABCONTROL,  # noqa: F405
-	UIA_TabItemControlTypeId: controlTypes.Role.TAB,  # noqa: F405
-	UIA_TextControlTypeId: controlTypes.Role.STATICTEXT,  # noqa: F405
-	UIA_ToolBarControlTypeId: controlTypes.Role.TOOLBAR,  # noqa: F405
-	UIA_ToolTipControlTypeId: controlTypes.Role.TOOLTIP,  # noqa: F405
-	UIA_TreeControlTypeId: controlTypes.Role.TREEVIEW,  # noqa: F405
-	UIA_TreeItemControlTypeId: controlTypes.Role.TREEVIEWITEM,  # noqa: F405
-	UIA_CustomControlTypeId: controlTypes.Role.UNKNOWN,  # noqa: F405
-	UIA_GroupControlTypeId: controlTypes.Role.GROUPING,  # noqa: F405
-	UIA_ThumbControlTypeId: controlTypes.Role.THUMB,  # noqa: F405
-	UIA_DataGridControlTypeId: controlTypes.Role.DATAGRID,  # noqa: F405
-	UIA_DataItemControlTypeId: controlTypes.Role.DATAITEM,  # noqa: F405
-	UIA_DocumentControlTypeId: controlTypes.Role.DOCUMENT,  # noqa: F405
-	UIA_SplitButtonControlTypeId: controlTypes.Role.SPLITBUTTON,  # noqa: F405
-	UIA_WindowControlTypeId: controlTypes.Role.WINDOW,  # noqa: F405
-	UIA_PaneControlTypeId: controlTypes.Role.PANE,  # noqa: F405
-	UIA_HeaderControlTypeId: controlTypes.Role.HEADER,  # noqa: F405
-	UIA_HeaderItemControlTypeId: controlTypes.Role.HEADERITEM,  # noqa: F405
-	UIA_TableControlTypeId: controlTypes.Role.TABLE,  # noqa: F405
-	UIA_TitleBarControlTypeId: controlTypes.Role.TITLEBAR,  # noqa: F405
-	UIA_SeparatorControlTypeId: controlTypes.Role.SEPARATOR,  # noqa: F405
+	UIA_ButtonControlTypeId: controlTypes.Role.BUTTON,
+	UIA_CalendarControlTypeId: controlTypes.Role.CALENDAR,
+	UIA_CheckBoxControlTypeId: controlTypes.Role.CHECKBOX,
+	UIA_ComboBoxControlTypeId: controlTypes.Role.COMBOBOX,
+	UIA_EditControlTypeId: controlTypes.Role.EDITABLETEXT,
+	UIA_HyperlinkControlTypeId: controlTypes.Role.LINK,
+	UIA_ImageControlTypeId: controlTypes.Role.GRAPHIC,
+	UIA_ListItemControlTypeId: controlTypes.Role.LISTITEM,
+	UIA_ListControlTypeId: controlTypes.Role.LIST,
+	UIA_MenuControlTypeId: controlTypes.Role.POPUPMENU,
+	UIA_MenuBarControlTypeId: controlTypes.Role.MENUBAR,
+	UIA_MenuItemControlTypeId: controlTypes.Role.MENUITEM,
+	UIA_ProgressBarControlTypeId: controlTypes.Role.PROGRESSBAR,
+	UIA_RadioButtonControlTypeId: controlTypes.Role.RADIOBUTTON,
+	UIA_ScrollBarControlTypeId: controlTypes.Role.SCROLLBAR,
+	UIA_SliderControlTypeId: controlTypes.Role.SLIDER,
+	UIA_SpinnerControlTypeId: controlTypes.Role.SPINBUTTON,
+	UIA_StatusBarControlTypeId: controlTypes.Role.STATUSBAR,
+	UIA_TabControlTypeId: controlTypes.Role.TABCONTROL,
+	UIA_TabItemControlTypeId: controlTypes.Role.TAB,
+	UIA_TextControlTypeId: controlTypes.Role.STATICTEXT,
+	UIA_ToolBarControlTypeId: controlTypes.Role.TOOLBAR,
+	UIA_ToolTipControlTypeId: controlTypes.Role.TOOLTIP,
+	UIA_TreeControlTypeId: controlTypes.Role.TREEVIEW,
+	UIA_TreeItemControlTypeId: controlTypes.Role.TREEVIEWITEM,
+	UIA_CustomControlTypeId: controlTypes.Role.UNKNOWN,
+	UIA_GroupControlTypeId: controlTypes.Role.GROUPING,
+	UIA_ThumbControlTypeId: controlTypes.Role.THUMB,
+	UIA_DataGridControlTypeId: controlTypes.Role.DATAGRID,
+	UIA_DataItemControlTypeId: controlTypes.Role.DATAITEM,
+	UIA_DocumentControlTypeId: controlTypes.Role.DOCUMENT,
+	UIA_SplitButtonControlTypeId: controlTypes.Role.SPLITBUTTON,
+	UIA_WindowControlTypeId: controlTypes.Role.WINDOW,
+	UIA_PaneControlTypeId: controlTypes.Role.PANE,
+	UIA_HeaderControlTypeId: controlTypes.Role.HEADER,
+	UIA_HeaderItemControlTypeId: controlTypes.Role.HEADERITEM,
+	UIA_TableControlTypeId: controlTypes.Role.TABLE,
+	UIA_TitleBarControlTypeId: controlTypes.Role.TITLEBAR,
+	UIA_SeparatorControlTypeId: controlTypes.Role.SEPARATOR,
 }
 
-UIALiveSettingtoNVDAAriaLivePoliteness: Dict[str, aria.AriaLivePoliteness] = {
+UIALiveSettingtoNVDAAriaLivePoliteness: dict[str, aria.AriaLivePoliteness] = {
 	UIA.Off: aria.AriaLivePoliteness.OFF,
 	UIA.Polite: aria.AriaLivePoliteness.POLITE,
 	UIA.Assertive: aria.AriaLivePoliteness.ASSERTIVE,
@@ -216,14 +248,14 @@ localEventHandlerGroupUIAPropertyIds = (
 	set(UIAPropertyIdsToNVDAEventNames) - globalEventHandlerGroupUIAPropertyIds
 )
 
-UIALandmarkTypeIdsToLandmarkNames: Dict[int, str] = {
+UIALandmarkTypeIdsToLandmarkNames: dict[int, str] = {
 	UIA.UIA_FormLandmarkTypeId: "form",
 	UIA.UIA_NavigationLandmarkTypeId: "navigation",
 	UIA.UIA_MainLandmarkTypeId: "main",
 	UIA.UIA_SearchLandmarkTypeId: "search",
 }
 
-UIAEventIdsToNVDAEventNames: Dict[int, str] = {
+UIAEventIdsToNVDAEventNames: dict[int, str] = {
 	UIA.UIA_LiveRegionChangedEventId: "liveRegionChange",
 	UIA.UIA_SelectionItem_ElementSelectedEventId: "UIA_elementSelected",
 	UIA.UIA_MenuOpenedEventId: "gainFocus",
@@ -243,26 +275,23 @@ UIAEventIdsToNVDAEventNames: Dict[int, str] = {
 
 localEventHandlerGroupUIAEventIds = set()
 
-autoSelectDetectionAvailable = False
-if winVersion.getWinVer() >= winVersion.WIN10:
-	UIAEventIdsToNVDAEventNames.update(
-		{
-			UIA.UIA_Text_TextSelectionChangedEventId: "caret",
-		},
-	)
-	localEventHandlerGroupUIAEventIds.update(
-		{
-			UIA.UIA_Text_TextSelectionChangedEventId,
-		},
-	)
-	autoSelectDetectionAvailable = True
+UIAEventIdsToNVDAEventNames.update(
+	{
+		UIA.UIA_Text_TextSelectionChangedEventId: "caret",
+	},
+)
+localEventHandlerGroupUIAEventIds.update(
+	{
+		UIA.UIA_Text_TextSelectionChangedEventId,
+	},
+)
 
 globalEventHandlerGroupUIAEventIds = set(UIAEventIdsToNVDAEventNames) - localEventHandlerGroupUIAEventIds
 
 ignoreWinEventsMap = {
-	UIA_AutomationPropertyChangedEventId: list(UIAPropertyIdsToNVDAEventNames.keys()),  # noqa: F405
+	UIA_AutomationPropertyChangedEventId: list(UIAPropertyIdsToNVDAEventNames.keys()),
 }
-for id in UIAEventIdsToNVDAEventNames.keys():
+for id in UIAEventIdsToNVDAEventNames:
 	ignoreWinEventsMap[id] = [0]
 
 
@@ -287,7 +316,7 @@ def shouldUseUIAInMSWord(appModule: appModuleHandler.AppModule) -> bool:
 		return False
 	try:
 		officeVersion = tuple(int(x) for x in appModule.productVersion.split(".")[:3])
-	except Exception:
+	except Exception:  # noqa: BLE001
 		log.debugWarning(f"Unable to parse office version: {appModule.productVersion}", exc_info=True)
 		return False
 	if officeVersion < (16, 0, 15000):
@@ -298,7 +327,7 @@ def shouldUseUIAInMSWord(appModule: appModuleHandler.AppModule) -> bool:
 
 
 class UIAHandler(COMObject):
-	_com_interfaces_ = [
+	_com_interfaces_ = [  # noqa: RUF012
 		UIA.IUIAutomationEventHandler,
 		UIA.IUIAutomationFocusChangedEventHandler,
 		UIA.IUIAutomationPropertyChangedEventHandler,
@@ -308,7 +337,7 @@ class UIAHandler(COMObject):
 	_rateLimitedEventHandler: IUnknown | None = None
 
 	#: A cache of UIA notification kinds to friendly names for logging
-	_notificationKindsToNamesCache = {
+	_notificationKindsToNamesCache = {  # noqa: RUF012
 		v: k[len("NotificationKind_") :] for k, v in vars(UIA).items() if k.startswith("NotificationKind_")
 	}
 
@@ -327,7 +356,7 @@ class UIAHandler(COMObject):
 		return name
 
 	#: A cache of UIA notification processing values  to friendly names for logging
-	_notificationProcessingValuesToNamesCache = {
+	_notificationProcessingValuesToNamesCache = {  # noqa: RUF012
 		v: k[len("NotificationProcessing_") :]
 		for k, v in vars(UIA).items()
 		if k.startswith("NotificationProcessing_")
@@ -365,7 +394,7 @@ class UIAHandler(COMObject):
 		return name
 
 	#: A cache of UIA event IDs to friendly names for logging
-	_eventIDsToNamesCache = {
+	_eventIDsToNamesCache = {  # noqa: RUF012
 		v: k[len("UIA_") : -len("EventId")] for k, v in vars(UIA).items() if k.endswith("EventId")
 	}
 
@@ -421,7 +450,7 @@ class UIAHandler(COMObject):
 		)
 
 	def __init__(self):
-		super(UIAHandler, self).__init__()
+		super().__init__()
 		self.globalEventHandlerGroup = None
 		self.localEventHandlerGroup = None
 		self.localEventHandlerGroupWithTextChanges = None
@@ -443,14 +472,14 @@ class UIAHandler(COMObject):
 		# Terminate the rate limited event handler if it exists.
 		# We must do this from the main thread to totally ensure that the thread is terminated,
 		# As this is a c++ thread so Python cannot kill it off at process exit.
-		if config.conf["UIA"]["enhancedEventProcessing"]:
+		if config.conf["UIA"]["enhancedEventProcessing"]:  # noqa: SIM102
 			if self._rateLimitedEventHandler:
 				log.debug("UIAHandler: Terminating enhanced event processing")
 				NVDAHelper.localLib.rateLimitedUIAEventHandler_terminate(self._rateLimitedEventHandler)
 
 		# Terminate the MTA thread
 		MTAThreadHandle = ctypes.wintypes.HANDLE(
-			windll.kernel32.OpenThread(
+			winBindings.kernel32.OpenThread(
 				winKernel.SYNCHRONIZE,
 				False,
 				self.MTAThread.ident,
@@ -458,14 +487,14 @@ class UIAHandler(COMObject):
 		)
 		self.MTAThreadQueue.put_nowait(None)
 		# Wait for the MTA thread to die (while still message pumping)
-		if windll.user32.MsgWaitForMultipleObjects(1, byref(MTAThreadHandle), False, 200, 0) != 0:
+		if user32.MsgWaitForMultipleObjects(1, byref(MTAThreadHandle), False, 200, 0) != 0:
 			log.debugWarning("Timeout or error while waiting for UIAHandler MTA thread")
-		windll.kernel32.CloseHandle(MTAThreadHandle)
+		winBindings.kernel32.CloseHandle(MTAThreadHandle)
 		del self.MTAThread
 
 	def MTAThreadFunc(self):
 		try:
-			oledll.ole32.CoInitializeEx(None, comtypes.COINIT_MULTITHREADED)
+			winBindings.ole32.CoInitializeEx(None, comtypes.COINIT_MULTITHREADED)
 			self.clientObject = CoCreateInstance(
 				UIA.CUIAutomation8._reg_clsid_,
 				# Minimum interface is IUIAutomation3 (Windows 8.1).
@@ -512,24 +541,24 @@ class UIAHandler(COMObject):
 			log.info(f"UIAutomation: {self.clientObject.__class__.__mro__[1].__name__}")
 			self.windowTreeWalker = self.clientObject.createTreeWalker(
 				self.clientObject.CreateNotCondition(
-					self.clientObject.CreatePropertyCondition(UIA_NativeWindowHandlePropertyId, 0),  # noqa: F405
+					self.clientObject.CreatePropertyCondition(UIA_NativeWindowHandlePropertyId, 0),
 				),
-			)  # noqa: F405
+			)
 			self.windowCacheRequest = self.clientObject.CreateCacheRequest()
-			self.windowCacheRequest.AddProperty(UIA_NativeWindowHandlePropertyId)  # noqa: F405
+			self.windowCacheRequest.AddProperty(UIA_NativeWindowHandlePropertyId)
 			self.UIAWindowHandleCache = {}
 			self.baseTreeWalker = self.clientObject.RawViewWalker
 			self.baseCacheRequest = self.windowCacheRequest.Clone()
 			for propertyId in baseCachePropertyIDs:
 				self.baseCacheRequest.addProperty(propertyId)
-			self.baseCacheRequest.addPattern(UIA_TextPatternId)  # noqa: F405
+			self.baseCacheRequest.addPattern(UIA_TextPatternId)
 			self.rootElement = self.clientObject.getRootElementBuildCache(self.baseCacheRequest)
 			self.reservedNotSupportedValue = self.clientObject.ReservedNotSupportedValue
 			self.ReservedMixedAttributeValue = self.clientObject.ReservedMixedAttributeValue
 			if config.conf["UIA"]["enhancedEventProcessing"]:
 				handler = self._rateLimitedEventHandler = POINTER(IUnknown)()
 				NVDAHelper.localLib.rateLimitedUIAEventHandler_create(
-					self._com_pointers_[IUnknown._iid_],
+					self.QueryInterface(IUnknown),
 					byref(self._rateLimitedEventHandler),
 				)
 			else:
@@ -539,7 +568,7 @@ class UIAHandler(COMObject):
 			self._registerGlobalEventHandlers(handler)
 			if winVersion.getWinVer() >= winVersion.WIN11:
 				UIARemote.initialize(True, self.clientObject)
-		except Exception as e:
+		except Exception as e:  # noqa: BLE001
 			self.MTAThreadInitException = e
 		finally:
 			self.MTAThreadInitEvent.set()
@@ -549,7 +578,7 @@ class UIAHandler(COMObject):
 				try:
 					func()
 				except Exception:
-					log.error("Exception in function queued to UIA MTA thread", exc_info=True)
+					log.error("Exception in function queued to UIA MTA thread", exc_info=True)  # noqa: G201
 			else:
 				break
 		self.clientObject.RemoveAllEventHandlers()
@@ -587,7 +616,7 @@ class UIAHandler(COMObject):
 				self.baseCacheRequest,
 				handler,
 			)
-		if not utils._shouldSelectivelyRegister() and winVersion.getWinVer() >= winVersion.WIN10:
+		if not utils._shouldSelectivelyRegister():
 			# #14067: Due to poor performance, textChange requires special handling
 			self.globalEventHandlerGroup.AddAutomationEventHandler(
 				UIA.UIA_Text_TextChangedEventId,
@@ -698,12 +727,12 @@ class UIAHandler(COMObject):
 				if _isDebug():
 					log.debugWarning(
 						f"{logPrefix} registering for textChange events from UIA element "
-						f"with class name {repr(element.currentClassName)} "
-						f"and automation ID {repr(element.CachedAutomationID)}",
+						f"with class name {element.currentClassName!r} "
+						f"and automation ID {element.CachedAutomationID!r}",
 					)
 				self.addEventHandlerGroup(element, group)
 			except COMError:
-				log.error("Could not register for UIA events for element", exc_info=True)
+				log.error("Could not register for UIA events for element", exc_info=True)  # noqa: G201
 			else:
 				self._localEventHandlerGroupElements.add(element)
 
@@ -736,19 +765,27 @@ class UIAHandler(COMObject):
 			if _isDebug():
 				log.debug("HandleAutomationEvent: event received while not fully initialized")
 			return
-		if eventID == UIA_MenuOpenedEventId and eventHandler.isPendingEvents("gainFocus"):  # noqa: F405
+		if utils._shouldSkipEventForHungWindow(sender):
+			if _isDebug():
+				log.debug("HandleAutomationEvent: dropping event; sender's application is not responding")
+			return
+		if eventID == UIA_MenuOpenedEventId and eventHandler.isPendingEvents("gainFocus"):
 			# We don't need the menuOpened event if focus has been fired,
 			# as focus should be more correct.
 			if _isDebug():
 				log.debug("HandleAutomationEvent: Ignored MenuOpenedEvent while focus event pending")
 			return
 		if eventID == UIA.UIA_Text_TextChangedEventId:
+			# Use the cached class name: NVDA registers every event handler group with
+			# baseCacheRequest, which caches UIA_ClassNamePropertyId, so this avoids a
+			# slow (and, for an unresponsive app, hanging) live cross-process fetch on
+			# this high-frequency text-change path.
 			if (
-				sender.currentClassName in textChangeUIAClassNames
+				sender.CachedClassName in textChangeUIAClassNames
 				or sender.CachedAutomationID in textChangeUIAAutomationIDs
 				or (
 					not utils._shouldUseWindowsTerminalNotifications()
-					and sender.currentClassName in windowsTerminalUIAClassNames
+					and sender.CachedClassName in windowsTerminalUIAClassNames
 				)
 			):
 				NVDAEventName = "textChange"
@@ -801,7 +838,7 @@ class UIAHandler(COMObject):
 		if not obj:
 			try:
 				obj = NVDAObjects.UIA.UIA(windowHandle=window, UIAElement=sender)
-			except Exception:
+			except Exception:  # noqa: BLE001
 				if _isDebug():
 					log.debugWarning(
 						f"HandleAutomationEvent: Exception while creating object for event {NVDAEventName}",
@@ -821,13 +858,12 @@ class UIAHandler(COMObject):
 		):
 			if _isDebug():
 				log.debug(
-					"HandleAutomationEvent: "
-					f"Ignoring event {NVDAEventName} because ignored by object itself",
+					f"HandleAutomationEvent: Ignoring event {NVDAEventName} because ignored by object itself",
 				)
 			return
 		if _isDebug():
 			log.debug(
-				f"handleAutomationEvent: queuing NVDA event {NVDAEventName} " f"for NVDAObject {obj} ",
+				f"handleAutomationEvent: queuing NVDA event {NVDAEventName} for NVDAObject {obj} ",
 			)
 		eventHandler.queueEvent(NVDAEventName, obj)
 
@@ -842,6 +878,10 @@ class UIAHandler(COMObject):
 			# UIAHandler hasn't finished initialising yet, so just ignore this event.
 			if _isDebug():
 				log.debug("HandleFocusChangedEvent: event received while not fully initialized")
+			return
+		if utils._shouldSkipEventForHungWindow(sender):
+			if _isDebug():
+				log.debug("HandleFocusChangedEvent: dropping event; sender's application is not responding")
 			return
 		self.lastFocusedUIAElement = sender
 		if not self.isNativeUIAElement(sender):
@@ -890,7 +930,7 @@ class UIAHandler(COMObject):
 			return
 		try:
 			obj = NVDAObjects.UIA.UIA(windowHandle=window, UIAElement=sender)
-		except Exception:
+		except Exception:  # noqa: BLE001
 			if _isDebug():
 				log.debugWarning(
 					"HandleFocusChangedEvent: Exception while creating NVDAObject ",
@@ -913,7 +953,7 @@ class UIAHandler(COMObject):
 			return
 		if _isDebug():
 			log.debug(
-				"handleFocusChangedEvent: Queuing NVDA gainFocus event " f"for obj {obj} ",
+				f"handleFocusChangedEvent: Queuing NVDA gainFocus event for obj {obj} ",
 			)
 		eventHandler.queueEvent("gainFocus", obj)
 
@@ -936,6 +976,13 @@ class UIAHandler(COMObject):
 			# UIAHandler hasn't finished initialising yet, so just ignore this event.
 			if _isDebug():
 				log.debug("HandlePropertyChangedEvent: event received while not fully initialized")
+			return
+		# Note: this is intentionally after the #3867 newValue.vt = VT_EMPTY workaround above.
+		if utils._shouldSkipEventForHungWindow(sender):
+			if _isDebug():
+				log.debug(
+					"HandlePropertyChangedEvent: dropping event; sender's application is not responding",
+				)
 			return
 		try:
 			processId = sender.CachedProcessID
@@ -967,7 +1014,7 @@ class UIAHandler(COMObject):
 		):
 			if _isDebug():
 				log.debug(
-					"propertyChange event is for focus. " f"Redirecting event to focus NVDAObject {focus}",
+					f"propertyChange event is for focus. Redirecting event to focus NVDAObject {focus}",
 				)
 			obj = focus
 		elif not self.isNativeUIAElement(sender):
@@ -992,7 +1039,7 @@ class UIAHandler(COMObject):
 		if not obj:
 			try:
 				obj = NVDAObjects.UIA.UIA(windowHandle=window, UIAElement=sender)
-			except Exception:
+			except Exception:  # noqa: BLE001
 				if _isDebug():
 					log.debugWarning(
 						f"HandlePropertyChangedEvent: Exception while creating object for event {NVDAEventName}",
@@ -1009,18 +1056,18 @@ class UIAHandler(COMObject):
 				)
 		if _isDebug():
 			log.debug(
-				f"handlePropertyChangeEvent: queuing NVDA {NVDAEventName} event " f"for NVDAObject {obj} ",
+				f"handlePropertyChangeEvent: queuing NVDA {NVDAEventName} event for NVDAObject {obj} ",
 			)
 		eventHandler.queueEvent(NVDAEventName, obj)
 
 	def IUIAutomationNotificationEventHandler_HandleNotificationEvent(
 		self,
-		sender,
-		NotificationKind,
-		NotificationProcessing,
-		displayString,
-		activityId,
-	):
+		sender: UIA.IUIAutomationElement,
+		NotificationKind: int,
+		NotificationProcessing: int,
+		displayString: str,
+		activityId: str,
+	) -> None:
 		if _isDebug():
 			log.debug(
 				"handleNotificationEvent called "
@@ -1035,11 +1082,47 @@ class UIAHandler(COMObject):
 			if _isDebug():
 				log.debug("HandleNotificationEvent: event received while not fully initialized")
 			return
+		if utils._shouldSkipEventForHungWindow(sender):
+			if _isDebug():
+				log.debug("HandleNotificationEvent: dropping event; sender's application is not responding")
+			return
+		# Sometimes notification events can be fired on a UIAElement that has no windowHandle
+		# and does not connect through parents back to the desktop.
+		# #17841: yet messages such as window restored/maximized coming from File Explorer (Windows shell)
+		# should be announced from everywhere (applicable on Windows 11 24H2 and later).
+		# Therefore, ask app modules if notifications (including from these elements) should be processed.
+		try:
+			processId = sender.CachedProcessID
+		except COMError:
+			pass
+		else:
+			appMod = appModuleHandler.getAppModuleFromProcessID(processId)
+			if not appMod.shouldProcessUIANotificationEvent(
+				sender,
+				notificationKind=NotificationKind,
+				notificationProcessing=NotificationProcessing,
+				displayString=displayString,
+				activityId=activityId,
+			):
+				if _isDebug():
+					log.debugWarning(
+						"HandleNotificationEvent: dropping notification event "
+						f"at request of appModule {appMod.appName}",
+					)
+				return
+		# Take desktop window handle as a substitute if window handle is not set.
+		if not (window := self.getNearestWindowHandle(sender)):
+			window = api.getDesktopObject().windowHandle
+			if _isDebug():
+				log.debugWarning(
+					"HandleNotificationEvent: native window handle not found, "
+					f"using desktop window handle {window}",
+				)
 		import NVDAObjects.UIA
 
 		try:
-			obj = NVDAObjects.UIA.UIA(UIAElement=sender)
-		except Exception:
+			obj = NVDAObjects.UIA.UIA(UIAElement=sender, windowHandle=window)
+		except Exception:  # noqa: BLE001
 			if _isDebug():
 				log.debugWarning(
 					"HandleNotificationEvent: Exception while creating object: "
@@ -1050,8 +1133,7 @@ class UIAHandler(COMObject):
 				)
 			return
 		if not obj:
-			# Sometimes notification events can be fired on a UIAElement that has no windowHandle and does not connect through parents back to the desktop.
-			# There is nothing we can do with these.
+			# Sometimes UIA object can be None despite setting window handle to something else.
 			if _isDebug():
 				log.debug(
 					"HandleNotificationEvent: Ignoring because no object: "
@@ -1062,7 +1144,7 @@ class UIAHandler(COMObject):
 			return
 		if _isDebug():
 			log.debug(
-				"Queuing UIA_notification NVDA event " f"for NVDAObject {obj}",
+				f"Queuing UIA_notification NVDA event for NVDAObject {obj}",
 			)
 		eventHandler.queueEvent(
 			"UIA_notification",
@@ -1087,11 +1169,18 @@ class UIAHandler(COMObject):
 			if _isDebug():
 				log.debug("HandleActiveTextPositionchangedEvent: event received while not fully initialized")
 			return
+		if utils._shouldSkipEventForHungWindow(sender):
+			if _isDebug():
+				log.debug(
+					"HandleActiveTextPositionChangedEvent: dropping event; "
+					"sender's application is not responding",
+				)
+			return
 		import NVDAObjects.UIA
 
 		try:
 			obj = NVDAObjects.UIA.UIA(UIAElement=sender)
-		except Exception:
+		except Exception:  # noqa: BLE001
 			if _isDebug():
 				log.debugWarning(
 					"HandleActiveTextPositionChangedEvent: Exception while creating object: ",
@@ -1114,7 +1203,7 @@ class UIAHandler(COMObject):
 	# C901: '_isUIAWindowHelper' is too complex
 	# Note: when working on _isUIAWindowHelper, look for opportunities to simplify
 	# and move logic out into smaller helper functions.
-	def _isUIAWindowHelper(self, hwnd: int, isDebug=False) -> bool:  # noqa: C901
+	def _isUIAWindowHelper(self, hwnd: int, isDebug=False) -> bool:
 		if isDebug:
 			log.debug(f"checking window {self.getWindowHandleDebugString(hwnd)}")
 		# UIA in NVDA's process freezes in Windows 7 and below
@@ -1165,7 +1254,7 @@ class UIAHandler(COMObject):
 			# Testing shows that these controls emits proper events but they are ignored by NVDA.
 			try:
 				isOfficeApp = appModule.productName.startswith(("Microsoft Office", "Microsoft Outlook"))
-				isOffice2013OrOlder = int(appModule.productVersion.split(".")[0]) < 16
+				isOffice2013OrOlder = isOfficeApp and int(appModule.productVersion.split(".")[0]) < 16
 			except RuntimeError:
 				# this is not necessarily an office app, or an app with version information, for example geekbench 6.
 				log.debugWarning(
@@ -1182,8 +1271,19 @@ class UIAHandler(COMObject):
 							log.debug("Office 2013 ribon or older. Treating as non-UIA")
 						return False
 					parentHwnd = winUser.getAncestor(parentHwnd, winUser.GA_PARENT)
-		# Ask the window if it supports UIA natively
-		res = windll.UIAutomationCore.UiaHasServerSideProvider(hwnd)
+		# Ask the window if it supports UIA natively.
+		# Run via the watchdog's cancellable thread: this is a blocking
+		# cross-process call that the watchdog cannot otherwise cancel, so a
+		# hung application could freeze the core here until it is killed.
+		try:
+			res = watchdog.cancellableExecute(
+				winBindings.uiAutomationCore.UiaHasServerSideProvider,
+				hwnd,
+			)
+		except exceptions.CallCancelled:
+			if isDebug:
+				log.debug("UiaHasServerSideProvider cancelled; treating window as non-UIA")
+			return False
 		if res:
 			if isDebug:
 				log.debug("window has UIA server side provider")
@@ -1226,7 +1326,7 @@ class UIAHandler(COMObject):
 				# 'brchrome' is part of HP SureClick, a chromium-based browser which runs webpages to run in separate
 				# virtual machines - it supports UIA remoting but not IAccessible2 remoting.
 				hasAccessToIA2 = (
-					not appModule.isRunningUnderDifferentLogonSession and not appModule.appName == "brchrome"
+					not appModule.isRunningUnderDifferentLogonSession and not appModule.appName == "brchrome"  # noqa: SIM201
 				)
 				if (
 					AllowUiaInChromium.getConfig() == AllowUiaInChromium.NO
@@ -1353,8 +1453,7 @@ class UIAHandler(COMObject):
 			return None
 		if _isDebug():
 			log.debug(
-				"Found ancestor element "
-				f"with valid windowHandle {self.getWindowHandleDebugString(window)}",
+				f"Found ancestor element with valid windowHandle {self.getWindowHandleDebugString(window)}",
 			)
 		# Cache for future use to improve performance.
 		UIAElement._nearestWindowHandle = window
@@ -1429,7 +1528,7 @@ class UIAHandler(COMObject):
 		if processID == globalVars.appPid:
 			if _isDebug():
 				log.debug(
-					"element is local to NVDA, " "treating as non-native.",
+					"element is local to NVDA, treating as non-native.",
 				)
 			return False
 		# Whether this is a native element depends on whether its window natively supports UIA.
@@ -1476,7 +1575,7 @@ class UIAHandler(COMObject):
 		return False
 
 
-handler: Optional[UIAHandler] = None
+handler: UIAHandler | None = None
 
 
 def initialize():

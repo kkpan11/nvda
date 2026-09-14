@@ -1,6 +1,5 @@
-# -*- coding: UTF-8 -*-
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2024 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Patrick Zajda, Joseph Lee,
+# Copyright (C) 2006-2025 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Patrick Zajda, Joseph Lee,
 # Babbage B.V., Mozilla Corporation, Julien Cochuyt, Leonard de Ruijter, Cyrille Bougot
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
@@ -9,21 +8,15 @@
 @var runningTable: a dictionary of the currently running appModules, using their application's main window handle as a key.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 import itertools
 import ctypes
 import ctypes.wintypes
 import os
 import sys
 from types import ModuleType
-from typing import (
-	Any,
-	Dict,
-	List,
-	Optional,
-	Tuple,
-)
 
+import winBindings.kernel32
 import winVersion
 import importlib
 import importlib.util
@@ -33,7 +26,6 @@ import comtypes.client
 import baseObject
 from logHandler import log
 import NVDAHelper
-import NVDAState
 import winKernel
 import config
 import NVDAObjects  # Catches errors before loading default appModule
@@ -44,10 +36,35 @@ import extensionPoints
 from fileUtils import getFileVersionInfo
 import globalVars
 from systemUtils import getCurrentProcessLogonSessionId, getProcessLogonSessionId
+from oleacc import GetProcessHandleFromHwnd as _getProcessHandleFromHwnd
+from winUser import (
+	findTopLevelWindow as _findTopLevelWindow,
+	getWindowThreadProcessID as _getWindowThreadProcessID,
+)
+from comInterfaces import UIAutomationClient as UIA
+import winBindings.rpcrt4
+from utils import _deprecate
+
+
+__getattr__ = _deprecate.handleDeprecations(
+	_deprecate.MovedSymbol(
+		"processEntry32W",
+		"winBindings.kernel32",
+	),
+	_deprecate.MovedSymbol(
+		"_PROCESS_MACHINE_INFORMATION",
+		"winBindings.kernel32",
+	),
+	_deprecate.MovedSymbol(
+		"NVDAProcessID",
+		"globalVars",
+		"appPid",
+	),
+)
 
 
 # Dictionary of processID:appModule pairs used to hold the currently running modules
-runningTable: Dict[int, AppModule] = {}
+runningTable: dict[int, AppModule] = {}
 _getAppModuleLock = threading.RLock()
 #: Notifies when another application is taking foreground.
 #: This allows components to react upon application switches.
@@ -56,50 +73,11 @@ _getAppModuleLock = threading.RLock()
 post_appSwitch = extensionPoints.Action()
 
 
-_executableNamesToAppModsAddons: Dict[str, str] = dict()
+_executableNamesToAppModsAddons: dict[str, str] = dict()  # noqa: C408
 """AppModules registered with a given binary by add-ons are placed here.
 We cannot use l{appModules.EXECUTABLE_NAMES_TO_APP_MODS} for modules included in add-ons,
 since appModules in add-ons should take precedence over the one bundled in NVDA.
 """
-
-
-class processEntry32W(ctypes.Structure):
-	_fields_ = [
-		("dwSize", ctypes.wintypes.DWORD),
-		("cntUsage", ctypes.wintypes.DWORD),
-		("th32ProcessID", ctypes.wintypes.DWORD),
-		("th32DefaultHeapID", ctypes.wintypes.DWORD),
-		("th32ModuleID", ctypes.wintypes.DWORD),
-		("cntThreads", ctypes.wintypes.DWORD),
-		("th32ParentProcessID", ctypes.wintypes.DWORD),
-		("pcPriClassBase", ctypes.c_long),
-		("dwFlags", ctypes.wintypes.DWORD),
-		("szExeFile", ctypes.c_wchar * 260),
-	]
-
-
-class _PROCESS_MACHINE_INFORMATION(ctypes.Structure):
-	_fields_ = [
-		("ProcessMachine", ctypes.wintypes.USHORT),
-		("Res0", ctypes.wintypes.USHORT),
-		("MachineAttributes", ctypes.wintypes.DWORD),
-	]
-
-
-def __getattr__(attrName: str) -> Any:
-	"""Module level `__getattr__` used to preserve backward compatibility.
-	The module level variable `NVDAProcessID` is deprecated
-	and usages should be replaced with `globalVars.appPid`.
-	We cannot simply assign the value from `globalVars` to the old attribute
-	since add-ons are initialized before `appModuleHandler`
-	and when `appModuleHandler` was not yet initialized the variable was set to `None`.
-	"""
-	if attrName == "NVDAProcessID" and NVDAState._allowDeprecatedAPI():
-		log.warning("appModuleHandler.NVDAProcessID is deprecated, use globalVars.appPid instead.")
-		if initialize._alreadyInitialized:
-			return globalVars.appPid
-		return None
-	raise AttributeError(f"module {repr(__name__)} has no attribute {repr(attrName)}")
 
 
 def registerExecutableWithAppModule(executableName: str, appModName: str) -> None:
@@ -115,7 +93,7 @@ def unregisterExecutable(executableName: str) -> None:
 		log.error(f"Executable {executableName} was not previously registered.")
 
 
-def _getPossibleAppModuleNamesForExecutable(executableName: str) -> Tuple[str, ...]:
+def _getPossibleAppModuleNamesForExecutable(executableName: str) -> tuple[str, ...]:
 	"""Returns list of the appModule names for a given executable.
 	The names in the tuple are placed in order in which import of these aliases should be attempted that is:
 	- The alias registered by add-ons if any add-on registered an appModule for the executable
@@ -144,12 +122,12 @@ def doesAppModuleExist(name: str) -> bool:
 		modSpec = importlib.util.find_spec(f"appModules.{name}", package=appModules)
 	except ImportError:
 		modSpec = None
-	if modSpec is None:
+	if modSpec is None:  # noqa: SIM103
 		return False
 	return True
 
 
-def _importAppModuleForExecutable(executableName: str) -> Optional[ModuleType]:
+def _importAppModuleForExecutable(executableName: str) -> ModuleType | None:
 	"""Import and return appModule for a given executable or `None` if there is no module."""
 	for possibleModName in _getPossibleAppModuleNamesForExecutable(executableName):
 		# First, check whether the module exists.
@@ -173,17 +151,17 @@ def getAppNameFromProcessID(processID: int, includeExt: bool = False) -> str:
 	"""
 	if processID == globalVars.appPid:
 		return "nvda.exe" if includeExt else "nvda"
-	FSnapshotHandle = winKernel.kernel32.CreateToolhelp32Snapshot(2, 0)
-	FProcessEntry32 = processEntry32W()
-	FProcessEntry32.dwSize = ctypes.sizeof(processEntry32W)
-	ContinueLoop = winKernel.kernel32.Process32FirstW(FSnapshotHandle, ctypes.byref(FProcessEntry32))
-	appName = str()
+	FSnapshotHandle = winBindings.kernel32.CreateToolhelp32Snapshot(2, 0)
+	FProcessEntry32 = winBindings.kernel32.PROCESSENTRY32W()
+	FProcessEntry32.dwSize = ctypes.sizeof(FProcessEntry32)
+	ContinueLoop = winBindings.kernel32.Process32First(FSnapshotHandle, ctypes.byref(FProcessEntry32))
+	appName = ""
 	while ContinueLoop:
 		if FProcessEntry32.th32ProcessID == processID:
 			appName = FProcessEntry32.szExeFile
 			break
-		ContinueLoop = winKernel.kernel32.Process32NextW(FSnapshotHandle, ctypes.byref(FProcessEntry32))
-	winKernel.kernel32.CloseHandle(FSnapshotHandle)
+		ContinueLoop = winBindings.kernel32.Process32Next(FSnapshotHandle, ctypes.byref(FProcessEntry32))
+	winBindings.kernel32.CloseHandle(FSnapshotHandle)
 	if not includeExt:
 		appName = os.path.splitext(appName)[0].lower()
 	if not appName:
@@ -198,15 +176,63 @@ def getAppNameFromProcessID(processID: int, includeExt: bool = False) -> str:
 	return appName
 
 
+def getProcessHandleFromProcessId(processId: int, fallBackToTopLevelWindowEnumeration: bool = True) -> int:
+	"""
+	Get a process handle for the given process ID.
+
+	This function attempts to open a process handle using the Windows API. If the direct
+	approach fails and fallback is enabled, it will attempt to find a top-level window
+	belonging to the process and derive the process handle from that window.
+
+	:param processId: The ID of the process for which to obtain a handle
+	:param fallBackToTopLevelWindowEnumeration: Whether to attempt window enumeration
+		as a fallback method if direct process opening fails. Defaults to True
+	:return: A handle to the process, or 0 if no handle could be obtained
+	"""
+	processHandle: int = 0
+	try:
+		if not (
+			processHandle := winKernel.openProcess(
+				winKernel.SYNCHRONIZE | winKernel.PROCESS_QUERY_INFORMATION,
+				False,
+				processId,
+			)
+		):
+			raise ctypes.WinError()
+	except OSError:
+		log.debugWarning(f"Unable to open process for processId {processId}", exc_info=True)
+	else:
+		return processHandle
+
+	if fallBackToTopLevelWindowEnumeration:
+		try:
+			if not (
+				foundWindowHandle := _findTopLevelWindow(
+					lambda hwnd: _getWindowThreadProcessID(hwnd)[0] == processId,
+				)
+			):
+				raise RuntimeError(f"No window handle found for process {processId} to create process handle")
+			if not (processHandle := _getProcessHandleFromHwnd(foundWindowHandle)):
+				raise ctypes.WinError()
+		except (OSError, RuntimeError):
+			log.debugWarning(
+				f"Unable to get process handle for process {processId} using window enumeration "
+				"and subsequently getting process handle from that window",
+				exc_info=True,
+			)
+
+	return processHandle
+
+
 def getAppModuleForNVDAObject(obj: NVDAObjects.NVDAObject) -> AppModule:
 	if not isinstance(obj, NVDAObjects.NVDAObject):
 		return
 	mod = getAppModuleFromProcessID(obj.processID)
-	# #14403: some apps report process handle of 0, causing process information and other functions to fail.
+	# #14403: For some apps it is not possible to get a process handle,
+	# causing process information and other functions to fail.
 	if mod.processHandle == 0:
-		# Sometimes process handle for the NVDA object may not be defined, more so when running tests.
 		try:
-			mod.processHandle = obj.processHandle
+			mod.processHandle = _getProcessHandleFromHwnd(obj.windowHandle)
 		except AttributeError:
 			pass
 	return mod
@@ -246,9 +272,9 @@ def update(processID, helperLocalBindingHandle=None, inprocRegistrationHandle=No
 def cleanup():
 	"""Removes any appModules from the cache whose process has died."""
 	for deadMod in [mod for mod in runningTable.values() if not mod.isAlive]:
-		log.debug("application %s closed" % deadMod.appName)
+		log.debug("application %s closed" % deadMod.appName)  # noqa: UP031
 		del runningTable[deadMod.processID]
-		if deadMod in set(
+		if deadMod in set(  # noqa: C401, SIM102
 			o.appModule for o in api.getFocusAncestors() + [api.getFocusObject()] if o and o.appModule
 		):
 			if hasattr(deadMod, "event_appLoseFocus"):
@@ -259,7 +285,7 @@ def cleanup():
 		try:
 			deadMod.terminate()
 		except:  # noqa: E722
-			log.exception("Error terminating app module %r" % deadMod)
+			log.exception("Error terminating app module %r" % deadMod)  # noqa: UP031
 
 
 def fetchAppModule(processID: int, appName: str) -> AppModule:
@@ -278,7 +304,7 @@ def fetchAppModule(processID: int, appName: str) -> AppModule:
 		# what exceptions may be thrown during import / construction of the App Module.
 	except Exception:
 		log.exception(f"error in appModule {modName!r}")
-		import ui
+		import ui  # noqa: I001
 		import speech.priorities
 
 		ui.message(
@@ -342,7 +368,7 @@ def reloadAppModules():
 		except AttributeError:
 			continue
 		# Fetch and cache right away; the process could die any time.
-		obj.appModule
+		obj.appModule  # noqa: B018
 
 
 def initialize():
@@ -355,11 +381,11 @@ initialize._alreadyInitialized = False
 
 
 def terminate():
-	for processID, app in runningTable.items():
+	for processID, app in runningTable.items():  # noqa: PERF102
 		try:
 			app.terminate()
 		except:  # noqa: E722
-			log.exception("Error terminating app module %r" % app)
+			log.exception("Error terminating app module %r" % app)  # noqa: UP031
 	runningTable.clear()
 
 
@@ -474,37 +500,38 @@ class AppModule(baseObject.ScriptableObject):
 	"""The application name"""
 
 	def __init__(self, processID, appName=None):
-		super(AppModule, self).__init__()
+		super().__init__()
 		self.processID = processID
 		if appName is None:
 			appName = getAppNameFromProcessID(processID)
 		self.appName = appName
-		self.processHandle = winKernel.openProcess(
-			winKernel.SYNCHRONIZE | winKernel.PROCESS_QUERY_INFORMATION,
-			False,
-			processID,
-		)
-		self.helperLocalBindingHandle: Optional[ctypes.c_long] = None
+		self.processHandle = getProcessHandleFromProcessId(processID)
+		self.helperLocalBindingHandle: ctypes.c_long | None = None
 		"""RPC binding handle pointing to the RPC server for this process"""
 
 		self._inprocRegistrationHandle = None
 
-	def _getExecutableFileInfo(self):
-		# Used for obtaining file name and version for the executable.
-		# This is needed in case immersive app package returns an error,
-		# dealing with a native app, or a converted desktop app.
+	processExecutablePath: str
+	"""The path to the executable of the current process."""
+
+	def _get_processExecutablePath(self) -> str:
 		# Create the buffer to get the executable name
 		exeFileName = ctypes.create_unicode_buffer(ctypes.wintypes.MAX_PATH)
 		length = ctypes.wintypes.DWORD(ctypes.wintypes.MAX_PATH)
-		if not ctypes.windll.Kernel32.QueryFullProcessImageNameW(
+		if not winBindings.kernel32.QueryFullProcessImageName(
 			self.processHandle,
 			0,
 			exeFileName,
 			ctypes.byref(length),
 		):
 			raise ctypes.WinError()
-		fileName = exeFileName.value
-		fileinfo = getFileVersionInfo(fileName, "ProductName", "ProductVersion")
+		return exeFileName.value
+
+	def _getExecutableFileInfo(self):
+		# Used for obtaining file name and version for the executable.
+		# This is needed in case immersive app package returns an error,
+		# dealing with a native app, or a converted desktop app.
+		fileinfo = getFileVersionInfo(self.processExecutablePath, "ProductName", "ProductVersion")
 		return (fileinfo["ProductName"], fileinfo["ProductVersion"])
 
 	def _getImmersivePackageInfo(self):
@@ -514,10 +541,10 @@ class AppModule(baseObject.ScriptableObject):
 		# Some apps such as File Explorer says it is an immersive process but error 15700 is shown.
 		# Others such as Store version of Office are not truly hosted apps but are distributed via Store.
 		length = ctypes.c_uint()
-		ctypes.windll.kernel32.GetPackageFullName(self.processHandle, ctypes.byref(length), None)
+		winBindings.kernel32.GetPackageFullName(self.processHandle, ctypes.byref(length), None)
 		packageFullName = ctypes.create_unicode_buffer(length.value)
 		if (
-			ctypes.windll.kernel32.GetPackageFullName(
+			winBindings.kernel32.GetPackageFullName(
 				self.processHandle,
 				ctypes.byref(length),
 				packageFullName,
@@ -571,10 +598,37 @@ class AppModule(baseObject.ScriptableObject):
 	def _get_appModuleName(self):
 		return self.__class__.__module__.split(".")[-1]
 
+	_liveForEver: bool = False
+	"""
+	Set to true when NVDA cannot get enough permissions to successfully verify if the process is dead.
+	E.g. Security software such as 1Password which blocks the SYNCHRONIZE access right.
+	"""
+
 	isAlive: bool
 
-	def _get_isAlive(self):
-		return bool(winKernel.waitForSingleObject(self.processHandle, 0))
+	def _get_isAlive(self) -> bool:
+		if self._liveForEver:
+			return True
+		try:
+			return bool(winKernel.waitForSingleObject(self.processHandle, 0))
+		except OSError as e:
+			if e.winerror == winKernel.ERROR_INVALID_HANDLE:
+				# The process handle is invalid, so the process is dead.
+				log.debugWarning(
+					f"Process handle {self.processHandle} for {self} is invalid, assuming process is dead.",
+				)
+				return False
+			elif e.winerror == winKernel.ERROR_ACCESS_DENIED:
+				# Although we opened the process asking for the SYNCHRONIZE access right,
+				# The process is refusing us the permission when waiting on the handle.
+				# This may be a protected process like 1Password.
+				# Currently there is no alternative way to check if the process is dead, so we must assume it stays alive for ever.
+				log.debugWarning(
+					f"Access denied waiting on Process handle {self.processHandle} for {self}, cannot verify dead, marking as living for ever.",
+				)
+				self._liveForEver = True
+				return True
+			raise
 
 	def terminate(self):
 		"""Terminate this app module.
@@ -585,9 +639,9 @@ class AppModule(baseObject.ScriptableObject):
 		if getattr(self, "_helperPreventDisconnect", False):
 			return
 		if self._inprocRegistrationHandle:
-			ctypes.windll.rpcrt4.RpcSsDestroyClientContext(ctypes.byref(self._inprocRegistrationHandle))
+			winBindings.rpcrt4.RpcSsDestroyClientContext(ctypes.byref(self._inprocRegistrationHandle))
 		if self.helperLocalBindingHandle:
-			ctypes.windll.rpcrt4.RpcBindingFree(ctypes.byref(self.helperLocalBindingHandle))
+			winBindings.rpcrt4.RpcBindingFree(ctypes.byref(self.helperLocalBindingHandle))
 
 	def chooseNVDAObjectOverlayClasses(self, obj, clsList):
 		"""Choose NVDAObject overlay classes for a given NVDAObject.
@@ -609,7 +663,7 @@ class AppModule(baseObject.ScriptableObject):
 		"""
 		size = ctypes.wintypes.DWORD(ctypes.wintypes.MAX_PATH)
 		path = ctypes.create_unicode_buffer(size.value)
-		winKernel.kernel32.QueryFullProcessImageNameW(self.processHandle, 0, path, ctypes.byref(size))
+		winBindings.kernel32.QueryFullProcessImageName(self.processHandle, 0, path, ctypes.byref(size))
 		self.appPath = path.value if path else None
 		return self.appPath
 
@@ -625,7 +679,7 @@ class AppModule(baseObject.ScriptableObject):
 			# We need IsWow64Process2 to detect WOW64 on ARM64.
 			processMachine = ctypes.wintypes.USHORT()
 			if (
-				ctypes.windll.kernel32.IsWow64Process2(
+				winBindings.kernel32.IsWow64Process2(
 					self.processHandle,
 					ctypes.byref(processMachine),
 					None,
@@ -640,7 +694,7 @@ class AppModule(baseObject.ScriptableObject):
 			# IsWow64Process2 is only supported on Windows 10 version 1511 and later.
 			# Fall back to IsWow64Process.
 			res = ctypes.wintypes.BOOL()
-			if ctypes.windll.kernel32.IsWow64Process(self.processHandle, ctypes.byref(res)) == 0:
+			if winBindings.kernel32.IsWow64Process(self.processHandle, ctypes.byref(res)) == 0:
 				self.is64BitProcess = False
 				return False
 			self.is64BitProcess = not res
@@ -674,8 +728,8 @@ class AppModule(baseObject.ScriptableObject):
 			self.isRunningUnderDifferentLogonSession = (
 				getCurrentProcessLogonSessionId() != getProcessLogonSessionId(self.processHandle)
 			)
-		except WindowsError:
-			log.error(f"Couldn't compare logon session ID for {self}", exc_info=True)
+		except OSError:
+			log.error(f"Couldn't compare logon session ID for {self}", exc_info=True)  # noqa: G201
 			self.isRunningUnderDifferentLogonSession = False
 		return self.isRunningUnderDifferentLogonSession
 
@@ -698,15 +752,15 @@ class AppModule(baseObject.ScriptableObject):
 		}
 		# #14403: GetProcessInformation can be called from Windows 11 and later to obtain process machine.
 		if winVersion.getWinVer() >= winVersion.WIN11:
-			processMachineInfo = _PROCESS_MACHINE_INFORMATION()
+			processMachineInfo = winBindings.kernel32._PROCESS_MACHINE_INFORMATION()
 			# Constant comes from PROCESS_INFORMATION_CLASS enumeration.
 			ProcessMachineTypeInfo = 9
 			# Sometimes getProcessInformation may fail, so say "unknown".
-			if not ctypes.windll.kernel32.GetProcessInformation(
+			if not winBindings.kernel32.GetProcessInformation(
 				self.processHandle,
 				ProcessMachineTypeInfo,
 				ctypes.byref(processMachineInfo),
-				ctypes.sizeof(_PROCESS_MACHINE_INFORMATION),
+				ctypes.sizeof(processMachineInfo),
 			):
 				self.appArchitecture = "unknown"
 			else:
@@ -718,7 +772,7 @@ class AppModule(baseObject.ScriptableObject):
 			try:
 				# If a native app is running (such as x64 app on x64 machines), app architecture value is not set.
 				processMachine = ctypes.wintypes.USHORT()
-				ctypes.windll.kernel32.IsWow64Process2(self.processHandle, ctypes.byref(processMachine), None)
+				winBindings.kernel32.IsWow64Process2(self.processHandle, ctypes.byref(processMachine), None)
 				if not processMachine.value:
 					self.appArchitecture = winVersion.getWinVer().processorArchitecture
 				else:
@@ -760,19 +814,49 @@ class AppModule(baseObject.ScriptableObject):
 		"""
 		return True
 
+	def shouldProcessUIANotificationEvent(
+		self,
+		sender: UIA.IUIAutomationElement,
+		notificationKind: int | None = None,
+		notificationProcessing: int | None = None,
+		displayString: str = "",
+		activityId: str = "",
+	) -> bool:
+		"""
+		Determines whether NVDA should process a UIA notification event.
+
+		By default, events from elements with window handle value set
+		and traversable back to the desktop will be accepted.
+		Returning ``False`` will cause the event to be dropped completely.
+		Returning ``True`` means that the event will be processed, but it might still
+		be rejected later; e.g. because it isn't native UIA, because
+		shouldAcceptEvent returns False, etc.
+
+		:param sender: UIA element raising the notification event.
+		:param notificationKind: notification kind such as activity completion.
+		:param notificationProcessing: how NVDA should process notifications such as canceling speech.
+		:param displayString: notification content/text.
+		:param activityId: notification description.
+		:return: Whether NVDA components including ap modules and NVDA objects should process notification events.
+		"""
+		import UIAHandler
+
+		# By default, see if UIA tree can be traversed to arrive at the desktop element.
+		return bool(UIAHandler.handler.getNearestWindowHandle(sender))
+
 	def dumpOnCrash(self):
 		"""Request that this process writes a minidump when it crashes for debugging.
 		This should only be called if instructed by a developer.
 		"""
 		path = os.path.join(
 			tempfile.gettempdir(),
-			"nvda_crash_%s_%d.dmp" % (self.appName, self.processID),
+			"nvda_crash_%s_%d.dmp" % (self.appName, self.processID),  # noqa: UP031
 		)
 		NVDAHelper.localLib.nvdaInProcUtils_dumpOnCrash(
 			self.helperLocalBindingHandle,
 			path,
 		)
-		print("Dump path: %s" % path)
+		print("Dump path: %s" % path)  # noqa: UP031
 
 	def _get_statusBar(self):
 		"""Retrieve the status bar object of the application.
@@ -802,10 +886,10 @@ class AppModule(baseObject.ScriptableObject):
 		"""
 		raise NotImplementedError()
 
-	devInfo: List[str]
+	devInfo: list[str]
 	"""Information about this appModule useful to developers."""
 
-	def _get_devInfo(self) -> List[str]:
+	def _get_devInfo(self) -> list[str]:
 		"""Information about this appModule useful to developers.
 		For an NVDAObject, its appModule devInfo is appended to NVDAObject.devInfo.
 		Subclasses may extend this, calling the superclass property first.
@@ -814,27 +898,27 @@ class AppModule(baseObject.ScriptableObject):
 		info = []
 		try:
 			ret = repr(self)
-		except Exception as e:
+		except Exception as e:  # noqa: BLE001
 			ret = f"exception: {e}"
 		info.append(f"appModule: {ret}")
 		try:
 			ret = repr(self.productName)
-		except Exception as e:
+		except Exception as e:  # noqa: BLE001
 			ret = f"exception: {e}"
 		info.append(f"appModule.productName: {ret}")
 		try:
 			ret = repr(self.productVersion)
-		except Exception as e:
+		except Exception as e:  # noqa: BLE001
 			ret = f"exception: {e}"
 		info.append(f"appModule.productVersion: {ret}")
 		try:
 			ret = repr(self.helperLocalBindingHandle)
-		except Exception as e:
+		except Exception as e:  # noqa: BLE001
 			ret = f"exception: {e}"
 		info.append(f"appModule.helperLocalBindingHandle: {ret}")
 		try:
 			ret = repr(self.appArchitecture)
-		except Exception as e:
+		except Exception as e:  # noqa: BLE001
 			ret = f"exception: {e}"
 		info.append(f"appModule.appArchitecture: {ret}")
 		return info
@@ -844,7 +928,7 @@ class AppProfileTrigger(config.ProfileTrigger):
 	"""A configuration profile trigger for when a particular application has focus."""
 
 	def __init__(self, appName):
-		self.spec = "app:%s" % appName
+		self.spec = "app:%s" % appName  # noqa: UP031
 
 
 def getWmiProcessInfo(processId):
@@ -859,7 +943,7 @@ def getWmiProcessInfo(processId):
 	try:
 		wmi = comtypes.client.CoGetObject(r"winmgmts:root\cimv2", dynamic=True)
 		results = wmi.ExecQuery(
-			"select * from Win32_Process " "where ProcessId = %d" % processId,
+			"select * from Win32_Process where ProcessId = %d" % processId,  # noqa: UP031
 		)
 		for result in results:
 			return result

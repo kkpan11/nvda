@@ -8,20 +8,18 @@
 Kept here so they can be re-used without having to worry about circular imports.
 """
 
-from collections.abc import Sequence
+from collections.abc import Sequence  # noqa: I001
 from typing import (
 	Union,
-	Iterable,
 	Any,
-	Optional,
-	Generator,
 )
+from collections.abc import Iterable, Generator
 
 import config
 from logHandler import log
 from .commands import SpeechCommand
 
-SequenceItemT = Union[SpeechCommand, str]
+SequenceItemT = Union[SpeechCommand, str]  # noqa: UP007
 SpeechSequence = list[SequenceItemT]
 SpeechIterable = Iterable[SequenceItemT]
 
@@ -49,8 +47,8 @@ class GeneratorWithReturn(Iterable):
 
 
 def _flattenNestedSequences(
-	nestedSequences: Union[Iterable[SpeechSequence], GeneratorWithReturn],
-) -> Generator[SequenceItemT, Any, Optional[bool]]:
+	nestedSequences: Iterable[SpeechSequence] | GeneratorWithReturn,
+) -> Generator[SequenceItemT, Any, bool | None]:
 	"""Turns [[a,b,c],[d,e]] into [a,b,c,d,e]"""
 	yield from (i for seq in nestedSequences for i in seq)
 	if isinstance(nestedSequences, GeneratorWithReturn):
@@ -73,7 +71,7 @@ def logBadSequenceTypes(sequence: SpeechIterable, raiseExceptionOnError=False) -
 	# Check the type of the container
 	if not isinstance(sequence, Sequence):
 		log.error(
-			f"Unexpected Sequence Type: {type(sequence)!r} supplied," f" a {SpeechSequence!r} is required.",
+			f"Unexpected Sequence Type: {type(sequence)!r} supplied, a {SpeechSequence!r} is required.",
 			stack_info=True,
 		)
 		if raiseExceptionOnError:

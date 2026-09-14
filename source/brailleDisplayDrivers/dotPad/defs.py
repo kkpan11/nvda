@@ -1,10 +1,10 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2024 NV Access Limited
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
+# Copyright (C) 2024-2026 NV Access Limited, Dot Incorporated, Bram Duvigneau
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 
-import enum
+import enum  # noqa: I001
 import ctypes
 
 
@@ -26,6 +26,18 @@ class DP_Command(enum.IntEnum):
 	NTF_KEYS_ROUTING = 0x0322
 	NTF_KEYS_FUNCTION = 0x0332
 	NTF_ERROR = 0x9902
+
+	@property
+	def secondByte(self) -> int:
+		"""Get the second byte (LSB) of the command.
+
+		DotPad protocol uses big-endian encoding for 2-byte commands.
+		For most commands: second byte indicates message type (REQ=x0, RSP=x1, NTF=x2).
+		For key commands (0x03xx): second byte indicates key group (0x02/0x12/0x22/0x32).
+
+		Example: NTF_KEYS_FUNCTION (0x0332) -> 0x32
+		"""
+		return self.value & 0xFF
 
 
 class DP_ErrorCode(enum.IntEnum):
@@ -105,4 +117,31 @@ class DP_PerkinsKey(enum.IntEnum):
 	NAV_LEFT = 20
 
 
+class DP_KeyGroup(enum.IntEnum):
+	"""Key groups for DotPad notifications.
+
+	Values correspond to the second byte of NTF_KEYS_* commands.
+	"""
+
+	SCROLL = 0x02  # From NTF_KEYS_SCROLL (0x0302)
+	PERKINS = 0x12  # From NTF_KEYS_PERKINS (0x0312)
+	ROUTING = 0x22  # From NTF_KEYS_ROUTING (0x0322)
+	FUNCTION = 0x32  # From NTF_KEYS_FUNCTION (0x0332)
+
+
 DP_CHECKSUM_BASE = 0xA5
+
+DP_MAX_PACKET_SIZE = 512
+"""Largest plausible total packet size (sync bytes + length header + body).
+
+Real DotPad packets are far smaller; a declared length beyond this signals a
+desync or false header.
+"""
+
+DP_MIN_PACKET_SIZE = 4 + 5
+"""Smallest valid total packet size.
+
+A 4-byte header (2 sync bytes + 2-byte length) plus the 5-byte minimum body:
+destination + 2-byte command + sequence number + checksum. A declared length
+below this signals a desync or false header.
+"""

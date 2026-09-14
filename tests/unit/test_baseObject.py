@@ -1,12 +1,11 @@
-# tests/unit/test_baseObject.py
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2018-2019 NV Access Limited, Babbage B.V.
+# Copyright (C) 2018-2025 NV Access Limited, Babbage B.V.
 
 """Unit tests for the baseObject module, its classes and their derivatives."""
 
-import unittest
+import unittest  # noqa: I001
 from baseObject import AutoPropertyObject
 from .objectProvider import PlaceholderNVDAObject
 from scriptHandler import script
@@ -26,7 +25,7 @@ class NVDAObjectWithGesturesDictionary(PlaceholderNVDAObject):
 	def script_bravo(self, gesture):
 		return
 
-	__gestures = {
+	__gestures = {  # noqa: RUF012
 		"kb:b": "bravo",
 	}
 
@@ -43,7 +42,7 @@ class NVDAObjectWithDecoratedScriptAndGesturesDictionary(PlaceholderNVDAObject):
 	def script_delta(self, gesture):
 		return
 
-	__gestures = {
+	__gestures = {  # noqa: RUF012
 		"kb:d": "delta",
 	}
 
@@ -62,7 +61,7 @@ class SubclassedNVDAObjectWithDecoratedScriptAndGesturesDictionary(
 	def script_foxtrot(self, gesture):
 		return
 
-	__gestures = {
+	__gestures = {  # noqa: RUF012
 		"kb:f": "foxtrot",
 	}
 
@@ -87,7 +86,7 @@ class DynamicNVDAObjectWithDecoratedScriptAndGesturesDictionary(PlaceholderNVDAO
 	def script_hotel(self, gesture):
 		return
 
-	__gestures = {
+	__gestures = {  # noqa: RUF012
 		"kb:h": "hotel",
 	}
 
@@ -111,12 +110,12 @@ class TestScriptableObject(unittest.TestCase):
 	def test_decoratedScriptsAndGestureDictionariesIfSubclassed(self):
 		obj = SubclassedNVDAObjectWithDecoratedScriptAndGesturesDictionary()
 		for key in ("a", "b", "c", "d", "e", "f"):
-			self.assertIn("kb:%s" % key, obj._gestureMap)
+			self.assertIn("kb:%s" % key, obj._gestureMap)  # noqa: UP031
 
 	def test_decoratedScriptsAndGestureDictionariesIfDynamic(self):
 		obj = DynamicNVDAObjectWithDecoratedScriptAndGesturesDictionary()
 		for key in ("a", "b", "c", "d", "g", "h"):
-			self.assertIn("kb:%s" % key, obj._gestureMap)
+			self.assertIn("kb:%s" % key, obj._gestureMap)  # noqa: UP031
 
 
 class AutoPropertyObjectWithAbstractProperty(AutoPropertyObject):
@@ -147,19 +146,21 @@ class TestAbstractAutoPropertyObjects(unittest.TestCase):
 	It also makes sure that abstract properties can be overridden on subclasses.
 	"""
 
+	@staticmethod
+	def _get_regex(className: str) -> str:
+		return rf"^Can't instantiate abstract class {className} without an implementation for abstract method 'x'"
+
 	def test_abstractProperty(self):
 		self.assertRaisesRegex(
 			TypeError,
-			"^Can't instantiate abstract class AutoPropertyObjectWithAbstractProperty "
-			"with abstract method x",
+			self._get_regex("AutoPropertyObjectWithAbstractProperty"),
 			AutoPropertyObjectWithAbstractProperty,
 		)
 
 	def test_subclassedAbstractProperty(self):
 		self.assertRaisesRegex(
 			TypeError,
-			"^Can't instantiate abstract class SubclassedAutoPropertyObjectWithAbstractProperty "
-			"with abstract method x",
+			self._get_regex("SubclassedAutoPropertyObjectWithAbstractProperty"),
 			SubclassedAutoPropertyObjectWithAbstractProperty,
 		)
 
@@ -172,7 +173,7 @@ class TestAbstractAutoPropertyObjects(unittest.TestCase):
 
 class AutoPropertyObjectWithClassProperty(AutoPropertyObject):
 	@classmethod
-	def _get_x(self):
+	def _get_x(cls):
 		return True
 
 

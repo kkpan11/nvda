@@ -7,7 +7,7 @@
 High-level UIA remote ops Unit tests for error handling including try, except, and uncaught errors.
 """
 
-from unittest import TestCase
+from unittest import TestCase  # noqa: I001
 from UIAHandler._remoteOps import operation
 from UIAHandler._remoteOps import remoteAPI
 
@@ -50,7 +50,7 @@ class Test_errorHandling(TestCase):
 			i = ra.newInt(3)
 			was_in_catch = ra.newBool(False)
 			with ra.tryBlock():
-				i / 0
+				i / 0  # type: ignore[reportUnusedExpression]
 			with ra.catchBlock():
 				was_in_catch.set(True)
 			ra.Return(i, was_in_catch)

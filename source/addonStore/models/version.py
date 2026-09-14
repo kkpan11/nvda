@@ -4,9 +4,8 @@
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-from typing import (
+from typing import (  # noqa: I001
 	NamedTuple,
-	Optional,
 	Protocol,
 )
 import addonAPIVersion
@@ -51,7 +50,7 @@ class SupportsVersionCheck(Protocol):
 	@property
 	def _hasOverriddenCompat(self) -> bool:
 		"""If True, this add-on has been manually overriden. The affects of override may be pending restart"""
-		import addonHandler
+		import addonHandler  # noqa: I001
 		from addonStore.models.status import AddonStateCategory
 
 		return (
@@ -106,7 +105,7 @@ class SupportsVersionCheck(Protocol):
 		self,
 		backwardsCompatToVersion: addonAPIVersion.AddonApiVersionT = addonAPIVersion.BACK_COMPAT_TO,
 		currentAPIVersion: addonAPIVersion.AddonApiVersionT = addonAPIVersion.CURRENT,
-	) -> Optional[str]:
+	) -> str | None:
 		from addonHandler.addonVersionCheck import hasAddonGotRequiredSupport, isAddonTested
 
 		if not hasAddonGotRequiredSupport(self, currentAPIVersion):
@@ -115,7 +114,7 @@ class SupportsVersionCheck(Protocol):
 				# Translators: The reason an add-on is not compatible.
 				# A more recent version of NVDA is required for the add-on to work.
 				# The placeholder will be replaced with Year.Major.Minor (e.g. 2019.1).
-				"An updated version of NVDA is required. " "NVDA version {nvdaVersion} or later.",
+				"An updated version of NVDA is required. NVDA version {nvdaVersion} or later.",
 			).format(
 				nvdaVersion=addonAPIVersion.formatForGUI(self.minimumNVDAVersion),
 			)

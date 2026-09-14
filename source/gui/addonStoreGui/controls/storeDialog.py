@@ -1,18 +1,12 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2022-2024 NV Access Limited, Cyrille Bougot, łukasz Golonka
+# Copyright (C) 2022-2025 NV Access Limited, Cyrille Bougot, łukasz Golonka
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-from typing import (
-	cast,
-)
 
-import wx
+import wx  # noqa: I001
 from wx.adv import BannerWindow
 
-from addonHandler import (
-	BUNDLE_EXTENSION,
-)
 from addonStore.dataManager import addonDataManager
 from addonStore.models.channel import Channel, _channelFilters
 from addonStore.models.status import (
@@ -20,7 +14,7 @@ from addonStore.models.status import (
 	_statusFilters,
 	_StatusFilterKey,
 )
-import config
+from config.registry import ADDON_BUNDLE_EXTENSION
 from core import callLater
 import globalVars
 import gui
@@ -33,6 +27,7 @@ from gui.settingsDialogs import SettingsDialog
 from logHandler import log
 
 from ..viewModels.store import AddonStoreVM
+from ..viewModels.addonList import AddonListField
 from .actions import _MonoActionsContextMenu
 from .addonList import AddonVirtualList
 from .details import AddonDetails
@@ -46,6 +41,7 @@ class AddonStoreDialog(SettingsDialog):
 	# more adapted like "AddonStore" so that old external links pointing to the add-ons manager paragraph now
 	# point to the Add-on Store one.
 	helpId = "AddonsManager"
+	shouldSuspendConfigProfileTriggers = False
 
 	def __init__(self, parent: wx.Window, storeVM: AddonStoreVM, openToTab: _StatusFilterKey | None = None):
 		self._storeVM = storeVM
@@ -53,7 +49,7 @@ class AddonStoreDialog(SettingsDialog):
 		self._actionsContextMenu = _MonoActionsContextMenu(self._storeVM)
 		self.openToTab = openToTab
 		super().__init__(parent, resizeable=True, buttons={wx.CLOSE})
-		if config.conf["addonStore"]["showWarning"]:
+		if addonDataManager.storeSettings.showWarning:
 			displayDialogAsModal(_SafetyWarningDialog(parent))
 		self.Maximize()
 
@@ -155,25 +151,28 @@ class AddonStoreDialog(SettingsDialog):
 		filterCtrlsLine1.sizer.AddSpacer(FILTER_MARGIN_PADDING)
 		filterCtrlHelper.addItem(filterCtrlsLine1.sizer, flag=wx.EXPAND, proportion=1)
 
-		self.channelFilterCtrl = cast(
-			wx.Choice,
-			filterCtrlsLine0.addLabeledControl(
-				# Translators: The label of a selection field to filter the list of add-ons in the add-on store dialog.
-				labelText=pgettext("addonStore", "Cha&nnel:"),
-				wxCtrlClass=wx.Choice,
-				choices=list(c.displayString for c in _channelFilters),
-			),
+		self.columnFilterCtrl = filterCtrlsLine0.addLabeledControl(
+			# Translators: The label of a selection field to sort the list of add-ons in the add-on store dialog.
+			labelText=pgettext("addonStore", "Sort by colu&mn:"),
+			wxCtrlClass=wx.Choice,
+			choices=self._storeVM.listVM._columnSortChoices,
+		)
+		self.columnFilterCtrl.Bind(wx.EVT_CHOICE, self.onColumnFilterChange, self.columnFilterCtrl)
+		self.bindHelpEvent("AddonStoreSortByColumn", self.columnFilterCtrl)
+
+		self.channelFilterCtrl = filterCtrlsLine0.addLabeledControl(
+			# Translators: The label of a selection field to filter the list of add-ons in the add-on store dialog.
+			labelText=pgettext("addonStore", "Cha&nnel:"),
+			wxCtrlClass=wx.Choice,
+			choices=list(c.displayString for c in _channelFilters),  # noqa: C400
 		)
 		self.channelFilterCtrl.Bind(wx.EVT_CHOICE, self.onChannelFilterChange, self.channelFilterCtrl)
 		self.bindHelpEvent("AddonStoreFilterChannel", self.channelFilterCtrl)
 
 		# Translators: The label of a checkbox to filter the list of add-ons in the add-on store dialog.
 		incompatibleAddonsLabel = pgettext("addonStore", "Include &incompatible add-ons")
-		self.includeIncompatibleCtrl = cast(
-			wx.CheckBox,
-			filterCtrlsLine0.addItem(
-				wx.CheckBox(self, label=incompatibleAddonsLabel),
-			),
+		self.includeIncompatibleCtrl = filterCtrlsLine0.addItem(
+			wx.CheckBox(self, label=incompatibleAddonsLabel),
 		)
 		self.includeIncompatibleCtrl.SetValue(0)
 		self.includeIncompatibleCtrl.Bind(
@@ -183,14 +182,11 @@ class AddonStoreDialog(SettingsDialog):
 		)
 		self.bindHelpEvent("AddonStoreFilterIncompatible", self.includeIncompatibleCtrl)
 
-		self.enabledFilterCtrl = cast(
-			wx.Choice,
-			filterCtrlsLine0.addLabeledControl(
-				# Translators: The label of a selection field to filter the list of add-ons in the add-on store dialog.
-				labelText=pgettext("addonStore", "Ena&bled/disabled:"),
-				wxCtrlClass=wx.Choice,
-				choices=list(c.displayString for c in EnabledStatus),
-			),
+		self.enabledFilterCtrl = filterCtrlsLine0.addLabeledControl(
+			# Translators: The label of a selection field to filter the list of add-ons in the add-on store dialog.
+			labelText=pgettext("addonStore", "Ena&bled/disabled:"),
+			wxCtrlClass=wx.Choice,
+			choices=list(c.displayString for c in EnabledStatus),  # noqa: C400
 		)
 		self.enabledFilterCtrl.Bind(wx.EVT_CHOICE, self.onEnabledFilterChange, self.enabledFilterCtrl)
 		self.bindHelpEvent("AddonStoreFilterEnabled", self.enabledFilterCtrl)
@@ -224,18 +220,33 @@ class AddonStoreDialog(SettingsDialog):
 	# Translators: Title for message shown prior to installing add-ons when closing the add-on store dialog.
 	_installationPromptTitle = pgettext("addonStore", "Add-on installation")
 
+	@staticmethod
+	def _installationPromptMsg(nAddonsPendingInstall: int) -> str:
+		return npgettext(
+			"addonStore",
+			# Translators: Message shown while installing add-ons after closing the add-on store dialog
+			# The placeholder {num} will be replaced with the number of add-ons to be installed
+			"Installing {num} add-on, please wait.",
+			"Installing {num} add-ons, please wait.",
+			nAddonsPendingInstall,
+		).format(num=nAddonsPendingInstall)
+
+	@staticmethod
+	def _cancelInstallationPromptMsg(numInProgress: int) -> str:
+		return npgettext(
+			"addonStore",
+			# Translators: Message shown prior to installing add-ons when closing the add-on store dialog
+			# The placeholder {num} will be replaced with the number of add-ons to be installed
+			"Download of {num} add-on in progress, cancel downloading?",
+			"Download of {num} add-ons in progress, cancel downloading?",
+			numInProgress,
+		).format(num=numInProgress)
+
 	def onClose(self, evt: wx.CommandEvent):
 		numInProgress = len(self._storeVM._downloader.progress)
 		if numInProgress:
 			res = gui.messageBox(
-				npgettext(
-					"addonStore",
-					# Translators: Message shown prior to installing add-ons when closing the add-on store dialog
-					# The placeholder {} will be replaced with the number of add-ons to be installed
-					"Download of {} add-on in progress, cancel downloading?",
-					"Download of {} add-ons in progress, cancel downloading?",
-					numInProgress,
-				).format(numInProgress),
+				self._cancelInstallationPromptMsg(numInProgress),
 				self._installationPromptTitle,
 				style=wx.YES_NO,
 			)
@@ -252,14 +263,7 @@ class AddonStoreDialog(SettingsDialog):
 			installingDialog = gui.IndeterminateProgressDialog(
 				self,
 				self._installationPromptTitle,
-				npgettext(
-					"addonStore",
-					# Translators: Message shown while installing add-ons after closing the add-on store dialog
-					# The placeholder {} will be replaced with the number of add-ons to be installed
-					"Installing {} add-on, please wait.",
-					"Installing {} add-ons, please wait.",
-					nAddonsPendingInstall,
-				).format(nAddonsPendingInstall),
+				self._installationPromptMsg(nAddonsPendingInstall),
 			)
 			self._storeVM.installPending()
 
@@ -275,7 +279,7 @@ class AddonStoreDialog(SettingsDialog):
 
 	@property
 	def _requiresRestart(self) -> bool:
-		from addonHandler import state, AddonStateCategory
+		from addonHandler import state, AddonStateCategory  # noqa: I001
 
 		if addonDataManager._downloadsPendingInstall or state[AddonStateCategory.PENDING_INSTALL]:
 			log.debug(
@@ -323,6 +327,9 @@ class AddonStoreDialog(SettingsDialog):
 		self.SetTitle(self._titleText)
 
 	def _toggleFilterControls(self):
+		self.columnFilterCtrl.Clear()
+		for c in self._storeVM.listVM._columnSortChoices:
+			self.columnFilterCtrl.Append(c)
 		self.channelFilterCtrl.Clear()
 		for c in _channelFilters:
 			if c != Channel.EXTERNAL:
@@ -358,6 +365,8 @@ class AddonStoreDialog(SettingsDialog):
 		self._storeVM._filteredStatusKey = self._statusFilterKey
 		self.addonListView._refreshColumns()
 		self._toggleFilterControls()
+		fieldIndex = self._storeVM.listVM.sortableFields.index(self._storeVM.listVM._sortByModelField)
+		self.columnFilterCtrl.SetSelection(fieldIndex * 2 + (1 if self._storeVM.listVM._reverseSort else 0))
 
 		channelFilterIndex = list(_channelFilters.keys()).index(self._storeVM._filterChannelKey)
 		self.channelFilterCtrl.SetSelection(channelFilterIndex)
@@ -370,6 +379,15 @@ class AddonStoreDialog(SettingsDialog):
 		if not self.addonListTabs.HasFocus():
 			self.addonListTabs.SetFocus()
 
+	def onColumnFilterChange(self, evt: wx.EVT_CHOICE):
+		# Each col index will correspond to 2 choices in the combo box (ascending and descending)
+		colIndex = evt.GetSelection() // 2
+		# Descending sort should be applied for odd choices of the combo box
+		reverse = evt.GetSelection() % 2
+		self._storeVM.listVM.setSortField(self._storeVM.listVM.sortableFields[colIndex], reverse)
+		log.debug(f"sorted by: {colIndex}; reversed: {reverse}")
+		self._storeVM.refresh()
+
 	def onChannelFilterChange(self, evt: wx.EVT_CHOICE):
 		self._storeVM._filterChannelKey = self._channelFilterKey
 		self._storeVM.listVM.setSelection(None)
@@ -378,7 +396,37 @@ class AddonStoreDialog(SettingsDialog):
 
 	def onFilterTextChange(self, evt: wx.EVT_TEXT):
 		filterText = self.searchFilterCtrl.GetValue()
+		if filterText:
+			filterText = filterText.strip()
+
+		# Clear selection in the VM so the list has a single canonical source of truth.
+		self._storeVM.listVM.setSelection(None)
+		# Also clear any UI selection to avoid accumulating multiple selected rows while filtering.
+		idx = self.addonListView.GetFirstSelected()
+		while idx >= 0:
+			self.addonListView.Select(idx, on=False)
+			idx = self.addonListView.GetNextSelected(idx)
+
+		# When a search is active, reflect search relevance (descending) in the column choice.
+		if filterText:
+			newSortField = AddonListField.searchRank
+			newReverse = True
+			if self._storeVM.listVM._sortByModelField != AddonListField.searchRank:
+				self._storeVM.listVM._cachePreviousSortField()
+		else:
+			# If cleared, revert the choice to the previously active VM sort field.
+			newSortField = self._storeVM.listVM._prevSortByModelField
+			newReverse = self._storeVM.listVM._prevReverseSort
+
+		newIndex = self._storeVM.listVM.sortableFields.index(newSortField)
+		newReverseOffset = 1 if newReverse else 0
+		self.columnFilterCtrl.SetSelection(newIndex * 2 + newReverseOffset)
+		self._storeVM.listVM.setSortField(newSortField, newReverse)
+		log.debug(f"filter text changed: {filterText}")
+
 		self.filter(filterText)
+		if self._storeVM.listVM.getCount() > 0:
+			self._storeVM.listVM.setSelection(0)
 
 	def onEnabledFilterChange(self, evt: wx.EVT_CHOICE):
 		index = self.enabledFilterCtrl.GetCurrentSelection()
@@ -400,7 +448,7 @@ class AddonStoreDialog(SettingsDialog):
 			# Translators: The message displayed in the dialog that
 			# allows you to choose an add-on package for installation.
 			message=pgettext("addonStore", "Choose Add-on Package File"),
-			wildcard=(fileTypeLabel + "|*.{ext}").format(ext=BUNDLE_EXTENSION),
+			wildcard=(fileTypeLabel + "|*.{ext}").format(ext=ADDON_BUNDLE_EXTENSION),
 			defaultDir="c:",
 			style=wx.FD_OPEN,
 		)

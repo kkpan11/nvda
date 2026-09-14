@@ -1,21 +1,30 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2022-2023 NV Access Limited, Cyrille Bougot
+# Copyright (C) 2022-2025 NV Access Limited, Cyrille Bougot, Leonard de Ruijter
+
+from collections.abc import Callable, Generator  # noqa: I001
 import enum
 import typing
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, mock_open, patch
 import io
+import yaml
 
 import configobj
 import configobj.validate
+from pycaw.constants import DEVICE_STATE
 
 from config import (
 	AggregatedSection,
 	ConfigManager,
 	featureFlag,
 )
+from config.configSections import (
+	_loadCustomSections,
+	_customSections,
+)
+from config.configSpec import confspec
 from config.featureFlag import (
 	FeatureFlag,
 )
@@ -24,12 +33,18 @@ from config.featureFlagEnums import (
 	BoolFlag,
 )
 from config.profileUpgradeSteps import (
+	_friendlyNameToEndpointId,
 	_upgradeConfigFrom_8_to_9_lineIndent,
 	_upgradeConfigFrom_8_to_9_cellBorders,
 	_upgradeConfigFrom_8_to_9_showMessages,
 	_upgradeConfigFrom_8_to_9_tetherTo,
 	upgradeConfigFrom_9_to_10,
 	upgradeConfigFrom_11_to_12,
+	upgradeConfigFrom_13_to_14,
+	upgradeConfigFrom_16_to_17,
+	upgradeConfigFrom_17_to_18,
+	upgradeConfigFrom_18_to_19,
+	upgradeConfigFrom_21_to_22,
 )
 from config.configFlags import (
 	NVDAKey,
@@ -38,10 +53,12 @@ from config.configFlags import (
 	ReportCellBorders,
 	TetherTo,
 	OutputMode,
+	ReportSpellingErrors,
 )
 from utils.displayString import (
 	DisplayStringEnum,
 )
+from utils.mmdevice import AudioOutputDevice
 
 
 class Config_FeatureFlagEnums_getAvailableEnums(unittest.TestCase):
@@ -144,7 +161,7 @@ class Config_FeatureFlag_validateFeatureFlag(unittest.TestCase):
 	def assertFeatureFlagState(
 		self,
 		flag: FeatureFlag,
-		enumType: typing.Type,
+		enumType: type,
 		value: enum.Enum,
 		behaviorOfDefault: enum.Enum,
 		calculatedValue: bool,
@@ -333,7 +350,7 @@ class CustomEnum(DisplayStringEnum):
 	WHEN_REQUIRED = enum.auto()
 	NEVER = enum.auto()
 
-	def _displayStringLabels(self) -> typing.Dict[enum.Enum, str]:
+	def _displayStringLabels(self) -> dict[enum.Enum, str]:
 		return {}
 
 
@@ -884,3 +901,546 @@ class Config_AggregatedSection_setitem(unittest.TestCase):
 		self.assertIs(self.testSection["foo"], defaultFlag)
 		self.testSection["foo"] = valueOfDefaultFlag
 		self.assertIs(self.testSection["foo"], valueOfDefaultFlag)
+
+
+class Config_AggregatedSection_pollution(unittest.TestCase):
+	"""Ensure that config profiles don't get polluted with overridden values equal to the base config"""
+
+	def setUp(self):
+		manager = ConfigManager()
+		spec = configobj.ConfigObj({"someBool": "boolean(default=True)"})
+		self.baseConfig = configobj.ConfigObj({"someBool": True})
+		self.profile = configobj.ConfigObj()
+		self.testSection = AggregatedSection(
+			manager=manager,
+			path=(),
+			spec=spec,
+			profiles=[self.baseConfig, self.profile],
+		)
+
+	def test_updateToSameValue(self):
+		self.testSection["someBool"] = True
+		# Since we set someBool to its existing value, don't touch the profile.
+		self.assertEqual(self.profile, {})
+
+	def test_updateToDifferentValue(self):
+		self.testSection["someBool"] = False
+		# Since we set someBool to a different value, update the profile.
+		self.assertEqual(self.profile, {"someBool": False})
+
+
+_DevicesT: typing.TypeAlias = dict[DEVICE_STATE, list[AudioOutputDevice]]  # noqa: PYI043, UP040
+
+
+def getOutputDevicesFactory(
+	devices: _DevicesT,
+) -> Callable[[DEVICE_STATE], Generator[AudioOutputDevice]]:
+	"""Create a callable that can be used to patch utils.mmdevice.getOutputDevices."""
+
+	def getOutputDevices(stateMask: DEVICE_STATE, **kw) -> Generator[AudioOutputDevice]:
+		yield from devices.get(stateMask, [])
+
+	return getOutputDevices
+
+
+class Config_ProfileUpgradeSteps_FriendlyNameToEndpointId(unittest.TestCase):
+	DEFAULT_DEVICES: _DevicesT = {  # noqa: RUF012
+		DEVICE_STATE.ACTIVE: [AudioOutputDevice("id1", "Device 1")],
+		DEVICE_STATE.UNPLUGGED: [AudioOutputDevice("id2", "Device 2")],
+		DEVICE_STATE.DISABLED: [AudioOutputDevice("id3", "Device 3")],
+		DEVICE_STATE.NOTPRESENT: [AudioOutputDevice("id4", "Device 4")],
+	}
+
+	def test_noDuplicates(self):
+		"""Test that mapping from a friendly name to an endpoint ID works as expected when there are no duplicate friendly names."""
+		devices = self.DEFAULT_DEVICES
+		for devicesState, devicesInState in devices.items():
+			for device in devicesInState:
+				with self.subTest(id=device.id, FriendlyName=device.friendlyName, state=devicesState):
+					self.performTest(*device, devices)
+
+	def test_orderOfPrecedence(self):
+		"""Test that, when there are devices with duplicate names in different states, the one with the preferred state is returned."""
+		FRIENDLY_NAME = "Device friendly name"
+		devices: _DevicesT = {
+			DEVICE_STATE.ACTIVE: [AudioOutputDevice("idA", FRIENDLY_NAME)],
+			DEVICE_STATE.DISABLED: [AudioOutputDevice("idD", FRIENDLY_NAME)],
+			DEVICE_STATE.NOTPRESENT: [AudioOutputDevice("idN", FRIENDLY_NAME)],
+			DEVICE_STATE.UNPLUGGED: [AudioOutputDevice("idU", FRIENDLY_NAME)],
+		}
+		with self.subTest("Friendly name is active"):
+			self.performTest(*devices[DEVICE_STATE.ACTIVE][0], devices)
+		devices[DEVICE_STATE.ACTIVE].pop()
+		with self.subTest("Friendly name is unplugged"):
+			self.performTest(*devices[DEVICE_STATE.UNPLUGGED][0], devices)
+		devices[DEVICE_STATE.UNPLUGGED].pop()
+		with self.subTest("Friendly name is disabled"):
+			self.performTest(*devices[DEVICE_STATE.DISABLED][0], devices)
+		devices[DEVICE_STATE.DISABLED].pop()
+		with self.subTest("Friendly name is notpresent"):
+			self.performTest(*devices[DEVICE_STATE.NOTPRESENT][0], devices)
+		devices[DEVICE_STATE.NOTPRESENT].pop()
+
+	def test_nonexistant(self):
+		"""Test that attempting a match for a friendly name that no device has returns None."""
+		devices = self.DEFAULT_DEVICES
+		self.performTest(friendlyName="Nonexistant", expectedId=None, devices=devices)
+
+	def test_noDevices(self):
+		"""Test that attempting a match for a friendly name that no device has returns None."""
+		devices: _DevicesT = {}
+		self.performTest(friendlyName="Anything", expectedId=None, devices=devices)
+
+	def performTest(self, expectedId: str | None, friendlyName: str, devices: _DevicesT):
+		"""Patch utils.mmdevice.getOutputDevices to return what we tell it, then test that friendlyNameToEndpointId returns the correct ID given a friendly name.
+		The odd order of arguments is so you can directly unpack an AudioOutputDevice.
+		"""
+		with patch(
+			"utils.mmdevice.getOutputDevices",
+			autospec=True,
+			side_effect=getOutputDevicesFactory(devices),
+		):
+			self.assertEqual(_friendlyNameToEndpointId(friendlyName), expectedId)
+
+
+class Config_upgradeProfileSteps_upgradeProfileFrom_13_to_14(unittest.TestCase):
+	def setUp(self):
+		devices: _DevicesT = {
+			DEVICE_STATE.ACTIVE: [AudioOutputDevice("id", "Friendly name")],
+		}
+		self._getOutputDevicesPatcher = patch(
+			"utils.mmdevice.getOutputDevices",
+			autospec=True,
+			side_effect=getOutputDevicesFactory(devices),
+		)
+		self._getOutputDevicesPatcher.start()
+		super().setUp()
+
+	def tearDown(self):
+		self._getOutputDevicesPatcher.stop()
+		super().tearDown()
+
+	def test_outputDeviceNotSet(self):
+		"""Test that upgrading with no output device set works."""
+		configString = ""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_13_to_14(profile)
+		with self.assertRaises(KeyError):
+			profile["speech"]["outputDevice"]
+		with self.assertRaises(KeyError):
+			profile["audio"]["outputDevice"]
+
+	def test_outputDeviceFound(self):
+		"""Test that upgrading the profile correctly creates the new key and value."""
+		configString = """
+		[speech]
+			outputDevice=Friendly name
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_13_to_14(profile)
+		self.assertEqual(profile["audio"]["outputDevice"], "id")
+		with self.assertRaises(KeyError):
+			profile["speech"]["outputDevice"]
+
+	def test_outputDeviceNotFound(self):
+		"""Test that upgrading the profile with an unidentifiable device doesn't create a new entry."""
+		configString = """
+		[speech]
+			outputDevice=Nonexistant device
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_13_to_14(profile)
+		with self.assertRaises(KeyError):
+			profile["speech"]["outputDevice"]
+		with self.assertRaises(KeyError):
+			profile["audio"]["outputDevice"]
+
+
+class Config_upgradeProfileSteps_upgradeProfileFrom_16_to_17(unittest.TestCase):
+	def test_rename(self):
+		v15Config = """
+[remote]
+	[[connections]]
+		last_connected = nvdaremote:6837, 192.168.0.123:456
+	[[controlserver]]
+		autoconnect = True
+		self_hosted = True
+		connection_type = 0
+		host = remote.example.com:1234
+		port = 31415
+		key = superSecurePassw0rd
+	[[seen_motds]]
+		nvdaremote.com:6837=7B502C3A1F48C8609AE212CDFB639DEE39673F5E
+	[[trusted_certs]]
+		sketchyServer.example.com:6837 = 64EC88CA00B268E5BA1A35678A1B5316D212F4F366B2477232534A8AECA37F3C
+"""
+		expectedV16Config = {
+			"remote": {
+				"connections": {
+					"lastConnected": ["nvdaremote:6837", "192.168.0.123:456"],
+				},
+				"controlServer": {
+					"autoconnect": "True",
+					"selfHosted": "True",
+					"connectionMode": "0",
+					"host": "remote.example.com:1234",
+					"port": "31415",
+					"key": "superSecurePassw0rd",
+				},
+				"seenMOTDs": {
+					"nvdaremote.com:6837": "7B502C3A1F48C8609AE212CDFB639DEE39673F5E",
+				},
+				"trustedCertificates": {
+					"sketchyServer.example.com:6837": "64EC88CA00B268E5BA1A35678A1B5316D212F4F366B2477232534A8AECA37F3C",
+				},
+			},
+		}
+		conf = configobj.ConfigObj(io.StringIO(v15Config))
+		upgradeConfigFrom_16_to_17(conf)
+		actualV16Config = conf.dict()
+		self.maxDiff = None
+		self.assertEqual(expectedV16Config, actualV16Config)
+
+
+class Config_upgradeProfileSteps_upgradeProfileFrom_17_to_18(unittest.TestCase):
+	def test_noBrailleSection(self):
+		"""Test upgrading when there is no braille section - should create the structure and add dotPad."""
+		configString = ""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_17_to_18(profile)
+		self.assertEqual(profile["braille"]["auto"]["excludedDisplays"], ["dotPad"])
+
+	def test_noAutoSection(self):
+		"""Test upgrading when braille section exists but no auto section - should create auto section and add dotPad."""
+		configString = """
+[braille]
+	display = auto
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_17_to_18(profile)
+		self.assertEqual(profile["braille"]["auto"]["excludedDisplays"], ["dotPad"])
+
+	def test_noExcludedDisplaysKey(self):
+		"""Test upgrading when auto section exists but no excludedDisplays key - should create key and add dotPad."""
+		configString = """
+[braille]
+	display = auto
+	[[auto]]
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_17_to_18(profile)
+		self.assertEqual(profile["braille"]["auto"]["excludedDisplays"], ["dotPad"])
+
+	def test_emptyExcludedDisplays(self):
+		"""Test upgrading when excludedDisplays exists but is empty - should add dotPad."""
+		configString = """
+[braille]
+	display = auto
+	[[auto]]
+		excludedDisplays =
+"""
+		profile = _loadProfile(configString)
+		# Manually set to empty list to simulate the state after config parsing
+		profile["braille"]["auto"]["excludedDisplays"] = []
+		upgradeConfigFrom_17_to_18(profile)
+		self.assertEqual(profile["braille"]["auto"]["excludedDisplays"], ["dotPad"])
+
+	def test_existingExcludedDisplays(self):
+		"""Test upgrading when excludedDisplays has other entries - should add dotPad to the list."""
+		configString = """
+[braille]
+	display = auto
+	[[auto]]
+		excludedDisplays = hidBrailleStandard,
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_17_to_18(profile)
+		expected = ["hidBrailleStandard", "dotPad"]
+		self.assertEqual(profile["braille"]["auto"]["excludedDisplays"], expected)
+
+	def test_dotPadAlreadyExcluded(self):
+		"""Test upgrading when dotPad is already in excludedDisplays - should not add it again."""
+		configString = """
+[braille]
+	display = auto
+	[[auto]]
+		excludedDisplays = dotPad, hidBrailleStandard
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_17_to_18(profile)
+		expected = ["dotPad", "hidBrailleStandard"]
+		self.assertEqual(profile["braille"]["auto"]["excludedDisplays"], expected)
+
+
+class Config_upgradeProfileSteps_upgradeProfileFrom_18_to_19(unittest.TestCase):
+	def test_DefaultProfile_Unmodified(self):
+		"""reportSpellingErrors unmodified."""
+		configString = "[documentFormatting]"
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_18_to_19(profile)
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["reportSpellingErrors"]
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["reportSpellingErrors2"]
+
+	def test_defaultProfile_reportSpellingErrors_false(self):
+		"""reportSpellingErrors set to False."""
+		configString = """
+		[documentFormatting]
+		reportSpellingErrors = False
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_18_to_19(profile)
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["reportSpellingErrors"]
+		self.assertEqual(
+			profile["documentFormatting"]["reportSpellingErrors2"],
+			ReportSpellingErrors.OFF.value,
+		)
+
+	def test_defaultProfile_reportSpellingErrors_true(self):
+		"""reportSpellingErrors set to True."""
+		configString = """
+		[documentFormatting]
+		reportSpellingErrors = True
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_18_to_19(profile)
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["reportSpellingErrors"]
+		self.assertEqual(
+			profile["documentFormatting"]["reportSpellingErrors2"],
+			ReportSpellingErrors.SPEECH.value,
+		)
+
+	def test_defaultProfile_reportSpellingErrors_invalid(self):
+		"""reportSpellingErrors set to a non-boolean value."""
+		configString = """
+		[documentFormatting]
+		reportSpellingErrors = notABool
+		"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_18_to_19(profile)
+		self.assertEqual(profile["documentFormatting"]["reportSpellingErrors"], "notABool")
+		with self.assertRaises(KeyError):
+			profile["documentFormatting"]["reportSpellingErrors2"]
+
+
+class Config_profileUpgradeSteps_upgradeConfigFrom_21_to_22(unittest.TestCase):
+	def test_noMathSection_unchanged(self):
+		"""Profile with no [math] section is not modified."""
+		profile = _loadProfile("")
+		upgradeConfigFrom_21_to_22(profile)
+		with self.assertRaises(KeyError):
+			profile["math"]
+
+	def test_noSpeechSection_unchanged(self):
+		"""Profile with [math] but no [[speech]] sub-section is not modified."""
+		configString = """
+[math]
+	impairment = Blindness
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_21_to_22(profile)
+		with self.assertRaises(KeyError):
+			profile["math"]["speech"]
+
+	def test_noLanguageKey_unchanged(self):
+		"""Profile with [math] / [[speech]] but no language key is not modified."""
+		configString = """
+[math]
+	impairment = Blindness
+	[[speech]]
+		verbosity = Medium
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_21_to_22(profile)
+		with self.assertRaises(KeyError):
+			profile["math"]["speech"]["language"]
+
+	def test_autoMixedCase_migratedToEn(self):
+		"""language = Auto (canonical old default) is migrated to 'en'."""
+		configString = """
+[math]
+	[[speech]]
+		language = Auto
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_21_to_22(profile)
+		self.assertEqual(profile["math"]["speech"]["language"], "en")
+
+	def test_autoLowerCase_migratedToEn(self):
+		"""language = auto (all lowercase) is migrated to 'en'."""
+		configString = """
+[math]
+	[[speech]]
+		language = auto
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_21_to_22(profile)
+		self.assertEqual(profile["math"]["speech"]["language"], "en")
+
+	def test_autoUpperCase_migratedToEn(self):
+		"""language = AUTO (all uppercase) is migrated to 'en'."""
+		configString = """
+[math]
+	[[speech]]
+		language = AUTO
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_21_to_22(profile)
+		self.assertEqual(profile["math"]["speech"]["language"], "en")
+
+	def test_nonAutoLanguage_unchanged(self):
+		"""language set to a valid non-Auto value is not modified."""
+		configString = """
+[math]
+	[[speech]]
+		language = fr
+"""
+		profile = _loadProfile(configString)
+		upgradeConfigFrom_21_to_22(profile)
+		self.assertEqual(profile["math"]["speech"]["language"], "fr")
+
+
+class Config_loadCustomSections(unittest.TestCase):
+	def setUp(self):
+		_customSections.clear()
+		self._origConfspecKeys = set(confspec.keys())
+		self._origBaseOnlySections = set(ConfigManager.BASE_ONLY_SECTIONS)
+
+	def tearDown(self):
+		for key in list(confspec.keys()):
+			if key not in self._origConfspecKeys:
+				del confspec[key]
+		_customSections.clear()
+		ConfigManager.BASE_ONLY_SECTIONS.clear()
+		ConfigManager.BASE_ONLY_SECTIONS.update(self._origBaseOnlySections)
+
+	def _callWithYamlData(self, data):
+		"""Call _loadCustomSections with yaml.safe_load returning data."""
+		with patch("builtins.open", mock_open()):  # noqa: SIM117
+			with patch("config.configSections.yaml.safe_load", return_value=data):
+				_loadCustomSections()
+
+	def test_fileNotFound_returnsWithoutAdding(self):
+		"""FileNotFoundError means nothing is loaded and customSections remains empty."""
+		with patch("builtins.open", side_effect=FileNotFoundError):
+			_loadCustomSections()
+		self.assertEqual(_customSections, {})
+
+	def test_osError_logsAndReturnsWithoutAdding(self):
+		"""OSError is logged and customSections remains empty."""
+		with patch("builtins.open", side_effect=OSError):  # noqa: SIM117
+			with patch("config.configSections.log.exception") as mockLog:
+				_loadCustomSections()
+		mockLog.assert_called_once()
+		self.assertEqual(_customSections, {})
+
+	def test_yamlError_logsAndReturnsWithoutAdding(self):
+		"""yaml.YAMLError is logged and customSections remains empty."""
+
+		with patch("builtins.open", mock_open()):  # noqa: SIM117
+			with patch("config.configSections.yaml.safe_load", side_effect=yaml.YAMLError):
+				with patch("config.configSections.log.exception") as mockLog:
+					_loadCustomSections()
+		mockLog.assert_called_once()
+		self.assertEqual(_customSections, {})
+
+	def test_noneContent_returnsWithoutAdding(self):
+		"""yaml.safe_load returning None means customSections remains empty."""
+		self._callWithYamlData(None)
+		self.assertEqual(_customSections, {})
+
+	def test_nonDictContent_logsErrorAndReturnsWithoutAdding(self):
+		"""Non-dict YAML content logs an error and nothing is added."""
+		with patch("builtins.open", mock_open()):  # noqa: SIM117
+			with patch("config.configSections.yaml.safe_load", return_value=["notADict"]):
+				with patch("config.configSections.log.error") as mockLog:
+					_loadCustomSections()
+		mockLog.assert_called_once()
+		self.assertEqual(_customSections, {})
+
+	def test_nonStringName_skipped(self):
+		"""Entries with non-string section names are skipped with a debug warning."""
+		data = {42: {"spec": {"key": "string(default='val')"}}}
+		with patch("builtins.open", mock_open()):  # noqa: SIM117
+			with patch("config.configSections.yaml.safe_load", return_value=data):
+				with patch("config.configSections.log.debugWarning") as mockLog:
+					_loadCustomSections()
+		mockLog.assert_called_once()
+		self.assertEqual(_customSections, {})
+
+	def test_missingSpec_skipped(self):
+		"""Entries without a 'spec' key are skipped."""
+		data = {"mySection": {"isBaseOnly": False}}
+		self._callWithYamlData(data)
+		self.assertNotIn("mySection", _customSections)
+
+	def test_nonDictEntry_skipped(self):
+		"""Entries that are not dicts are skipped."""
+		data = {"mySection": "notADict"}
+		self._callWithYamlData(data)
+		self.assertNotIn("mySection", _customSections)
+
+	def test_nonDictSpec_skipped(self):
+		"""Entries whose 'spec' value is not a dict are skipped."""
+		data = {"mySection": {"spec": "notADict"}}
+		self._callWithYamlData(data)
+		self.assertNotIn("mySection", _customSections)
+
+	def test_validSection_addedToCustomSections(self):
+		"""A valid section is added to customSections with isBaseOnly defaulting to False."""
+		spec = {"myKey": "string(default='hello')"}
+		data = {"mySection": {"spec": spec}}
+		self._callWithYamlData(data)
+		self.assertIn("mySection", _customSections)
+		self.assertEqual(_customSections["mySection"]["spec"], spec)
+		self.assertFalse(_customSections["mySection"]["isBaseOnly"])
+
+	def test_validSection_baseOnly_addedToBaseOnlySections(self):
+		"""A valid isBaseOnly section is added to ConfigManager.BASE_ONLY_SECTIONS."""
+		spec = {"myKey": "string(default='hello')"}
+		data = {"mySection": {"spec": spec, "isBaseOnly": True}}
+		self._callWithYamlData(data)
+		self.assertIn("mySection", _customSections)
+		self.assertTrue(_customSections["mySection"]["isBaseOnly"])
+		self.assertIn("mySection", ConfigManager.BASE_ONLY_SECTIONS)
+
+	def test_validSection_notBaseOnly_notInBaseOnlySections(self):
+		"""A valid section with isBaseOnly=False is not added to ConfigManager.BASE_ONLY_SECTIONS."""
+		spec = {"myKey": "string(default='hello')"}
+		data = {"mySection": {"spec": spec, "isBaseOnly": False}}
+		self._callWithYamlData(data)
+		self.assertIn("mySection", _customSections)
+		self.assertNotIn("mySection", ConfigManager.BASE_ONLY_SECTIONS)
+
+	def test_multipleSections_allAdded(self):
+		"""Multiple valid sections are all added to customSections."""
+		data = {
+			"section1": {"spec": {"k1": "string(default='a')"}},
+			"section2": {"spec": {"k2": "integer(default=1)"}},
+		}
+		self._callWithYamlData(data)
+		self.assertIn("section1", _customSections)
+		self.assertIn("section2", _customSections)
+
+	def test_nestedSubsections_addedToConfspecAndCustomSections(self):
+		"""A spec with nested subsections (dicts within dicts) is accepted and stored verbatim."""
+		spec = {
+			"topKey": "string(default='top')",
+			"subA": {
+				"keyA1": "integer(default=1)",
+				"keyA2": "boolean(default=False)",
+				"subB": {
+					"deepKey": "string(default='deep')",
+				},
+			},
+		}
+		data = {"myNestedSection": {"spec": spec}}
+		self._callWithYamlData(data)
+		self.assertIn("myNestedSection", _customSections)
+		self.assertEqual(_customSections["myNestedSection"]["spec"], spec)
+		self.assertFalse(_customSections["myNestedSection"]["isBaseOnly"])
+		self.assertIn("myNestedSection", confspec)
+		self.assertEqual(confspec["myNestedSection"], spec)

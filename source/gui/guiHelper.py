@@ -1,5 +1,5 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2016-2024 NV Access Limited, Łukasz Golonka
+# Copyright (C) 2016-2025 NV Access Limited, Łukasz Golonka
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
@@ -43,20 +43,28 @@ class myDialog(wx.Dialog):
 	...
 """
 
+from collections.abc import Callable  # noqa: I001
 from contextlib import contextmanager
+from functools import wraps
+import sys
+import threading
 import weakref
 from typing import (
+	Any,
+	Final,
 	Generic,
-	Optional,
-	Type,
 	TypeVar,
-	Union,
 	cast,
+	overload,
 )
 
 import wx
 from wx.lib import scrolledpanel, newevent
 from abc import ABCMeta
+
+# 600 was fairly arbitrarily chosen by a visual user to look acceptable on their machine.
+COMPLEX_DIALOG_WIDTH: Final[int] = 600
+"""Width of complex (non-message) dialogs."""
 
 #: border space to be used around all controls in dialogs
 BORDER_FOR_DIALOGS = 10
@@ -84,7 +92,7 @@ def autoThaw(control: wx.Window):
 	control.Thaw()
 
 
-class ButtonHelper(object):
+class ButtonHelper:
 	"""Class used to ensure that the appropriate space is added between each button, whether in horizontal or vertical
 	arrangement. This class should be used for groups of buttons. While it won't cause problems to use this class with a
 	single button there is little benefit. Individual buttons can be added directly to a sizer / sizer helper.
@@ -124,12 +132,39 @@ class ButtonHelper(object):
 		return wxButton
 
 
-def associateElements(firstElement: wx.Control, secondElement: wx.Control) -> wx.BoxSizer:
+# vertical controls where the label should go above visually, and the control should go below
+_VerticalCtrlT = TypeVar("_VerticalCtrlT", wx.ListCtrl, wx.ListBox, wx.TreeCtrl)
+# horizontal controls where the label should go first visually, and the control should go after
+_HorizontalCtrlT = TypeVar(
+	"_HorizontalCtrlT",
+	wx.Button,
+	wx.Choice,
+	wx.ComboBox,
+	wx.Slider,
+	wx.SpinCtrl,
+	wx.TextCtrl,
+)
+
+
+@overload
+def associateElements(firstElement: wx.StaticText, secondElement: _HorizontalCtrlT) -> wx.BoxSizer: ...  # noqa: UP047
+@overload
+def associateElements(firstElement: wx.StaticText, secondElement: wx.CheckBox) -> wx.BoxSizer: ...
+@overload
+def associateElements(firstElement: wx.StaticText, secondElement: _VerticalCtrlT) -> wx.BoxSizer: ...  # noqa: UP047
+@overload
+def associateElements(firstElement: wx.Button, secondElement: wx.CheckBox) -> wx.BoxSizer: ...
+@overload
+def associateElements(firstElement: wx.TextCtrl, secondElement: wx.Button) -> wx.BoxSizer: ...
+
+
+def associateElements(firstElement, secondElement) -> wx.BoxSizer:
 	"""Associates two GUI elements together. Handles choosing a layout and appropriate spacing. Abstracts away common
 	pairings used in the NVDA GUI.
 	Currently handles:
-		wx.StaticText and (wx.Choice, wx.TextCtrl, wx.Slider, wx.Button or wx.SpinCtrl) - Horizontal layout
-		wx.StaticText and (wx.ListCtrl or wx.ListBox or wx.TreeCtrl ) - Vertical layout
+		wx.StaticText and :const:`_HorizontalCtrlT` - Horizontal layout
+		wx.StaticText and wx.CheckBox - Horizontal layout, control first, label second
+		wx.StaticText and :const:`_VerticalCtrlT` - Vertical layout
 		wx.Button and wx.CheckBox - Horizontal layout
 		wx.TextCtrl and wx.Button - Horizontal layout
 	"""
@@ -140,35 +175,25 @@ def associateElements(firstElement: wx.Control, secondElement: wx.Control) -> wx
 
 	# staticText and input control
 	# likely a labelled control from LabeledControlHelper
-	if isinstance(firstElement, wx.StaticText) and isinstance(
-		secondElement,
-		(
-			wx.Button,
-			wx.Choice,
-			wx.Slider,
-			wx.SpinCtrl,
-			wx.TextCtrl,
-		),
-	):
-		sizer = wx.BoxSizer(wx.HORIZONTAL)
-		sizer.Add(firstElement, flag=wx.ALIGN_CENTER_VERTICAL)
-		sizer.AddSpacer(SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
-		sizer.Add(secondElement)
-	elif isinstance(firstElement, wx.StaticText) and isinstance(secondElement, wx.CheckBox):
-		# checkbox should go first, and label should go after
-		sizer = wx.BoxSizer(wx.HORIZONTAL)
-		sizer.Add(secondElement)
-		sizer.AddSpacer(SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
-		sizer.Add(firstElement, flag=wx.ALIGN_CENTER_VERTICAL)
-	# staticText and (ListCtrl, ListBox or TreeCtrl)
-	elif isinstance(firstElement, wx.StaticText) and isinstance(
-		secondElement,
-		(wx.ListCtrl, wx.ListBox, wx.TreeCtrl),
-	):
-		sizer = wx.BoxSizer(wx.VERTICAL)
-		sizer.Add(firstElement)
-		sizer.AddSpacer(SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
-		sizer.Add(secondElement, flag=wx.EXPAND, proportion=1)
+	if isinstance(firstElement, wx.StaticText):
+		# Horizontal layout, label first, control second
+		if isinstance(secondElement, _HorizontalCtrlT.__constraints__):
+			sizer = wx.BoxSizer(wx.HORIZONTAL)
+			sizer.Add(firstElement, flag=wx.ALIGN_CENTER_VERTICAL)
+			sizer.AddSpacer(SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+			sizer.Add(secondElement)
+		# Horizontal layout, control first, label second
+		elif isinstance(secondElement, wx.CheckBox):
+			sizer = wx.BoxSizer(wx.HORIZONTAL)
+			sizer.Add(secondElement)
+			sizer.AddSpacer(SPACE_BETWEEN_ASSOCIATED_CONTROL_HORIZONTAL)
+			sizer.Add(firstElement, flag=wx.ALIGN_CENTER_VERTICAL)
+		# Vertical layout, label above, control below
+		elif isinstance(secondElement, _VerticalCtrlT.__constraints__):
+			sizer = wx.BoxSizer(wx.VERTICAL)
+			sizer.Add(firstElement)
+			sizer.AddSpacer(SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+			sizer.Add(secondElement, flag=wx.EXPAND, proportion=1)
 	# button and checkBox
 	elif isinstance(firstElement, wx.Button) and isinstance(secondElement, wx.CheckBox):
 		sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -192,7 +217,7 @@ def associateElements(firstElement: wx.Control, secondElement: wx.Control) -> wx
 _LabeledControlT = TypeVar("_LabeledControlT", bound=wx.Control)
 
 
-class LabeledControlHelper(Generic[_LabeledControlT]):
+class LabeledControlHelper(Generic[_LabeledControlT]):  # noqa: UP046
 	"""Represents a Labeled Control. Provides a class to create and hold on to the objects and automatically associate
 	the two controls together.
 	Relies on guiHelper.associateElements(), any limitations in guiHelper.associateElements() also apply here.
@@ -206,7 +231,7 @@ class LabeledControlHelper(Generic[_LabeledControlT]):
 	# A handler is automatically added to the control to ensure the label is also shown / hidden.
 	ShowChanged, EVT_SHOW_CHANGED = newevent.NewEvent()
 
-	def __init__(self, parent: wx.Window, labelText: str, wxCtrlClass: Type[_LabeledControlT], **kwargs):
+	def __init__(self, parent: wx.Window, labelText: str, wxCtrlClass: type[_LabeledControlT], **kwargs):
 		"""@param parent: An instance of the parent wx window. EG wx.Dialog
 		@param labelText: The text to associate with a wx control.
 		@param wxCtrlClass: The class to associate with the label, eg: wx.TextCtrl
@@ -274,7 +299,7 @@ class LabeledControlHelper(Generic[_LabeledControlT]):
 		return self._sizer
 
 
-class PathSelectionHelper(object):
+class PathSelectionHelper:
 	"""
 	Abstracts away details for creating a path selection helper. The path selection helper is a textCtrl with a
 	button in horizontal layout. The Button launches a directory explorer. To get the path selected by the user, use the
@@ -320,8 +345,8 @@ class BoxSizerHelper:
 	def __init__(
 		self,
 		parent: wx.Dialog,
-		orientation: Optional[int] = None,
-		sizer: Optional[Union[wx.BoxSizer, wx.StaticBoxSizer]] = None,
+		orientation: int | None = None,
+		sizer: wx.BoxSizer | wx.StaticBoxSizer | None = None,
 	):
 		"""Init. Pass in either orientation OR sizer.
 		@param parent: An instance of the parent wx window. EG wx.Dialog
@@ -350,9 +375,9 @@ class BoxSizerHelper:
 		@param **keywordArgs: the extra args to pass when adding the item to the wx.Sizer. This parameter is
 			normally not necessary.
 		"""
-		assert (
-			not self.dialogDismissButtonsAdded
-		), "Buttons to dismiss the dialog already added, they should be the last item added."
+		assert not self.dialogDismissButtonsAdded, (
+			"Buttons to dismiss the dialog already added, they should be the last item added."
+		)
 
 		toAdd = item
 		shouldAddSpacer = self.hasFirstItemBeenAdded
@@ -392,7 +417,7 @@ class BoxSizerHelper:
 	def addLabeledControl(
 		self,
 		labelText: str,
-		wxCtrlClass: Type[_LabeledControlT],
+		wxCtrlClass: type[_LabeledControlT],
 		**kwargs,
 	) -> _LabeledControlT:
 		"""Convenience method to create a labeled control
@@ -443,7 +468,7 @@ class BoxSizerHelper:
 		elif isinstance(buttons, int):
 			toAdd = self._parentRef().CreateButtonSizer(buttons)
 		else:
-			raise NotImplementedError("Unknown type: {}".format(buttons))
+			raise NotImplementedError(f"Unknown type: {buttons}")
 		if separated:
 			parentBox = self._parentRef()
 			if isinstance(self.sizer, wx.StaticBoxSizer):
@@ -457,4 +482,64 @@ class BoxSizerHelper:
 class SIPABCMeta(wx.siplib.wrappertype, ABCMeta):
 	"""Meta class to be used for wx subclasses with abstract methods."""
 
-	pass
+
+def wxCallOnMain[**P, T](
+	function: Callable[P, T],
+	*args: P.args,
+	**kwargs: P.kwargs,
+) -> T:
+	"""Call a non-thread-safe wx function in a thread-safe way.
+	Blocks current thread.
+
+	Using this function is preferable over calling :fun:`wx.CallAfter` directly when you care about the return time or return value of the function.
+
+	This function blocks the thread on which it is called.
+
+	:param function: Callable to call on the main GUI thread.
+		If this thread is the GUI thread, the function will be called immediately.
+		Otherwise, it will be scheduled to be called on the GUI thread.
+		In either case, the current thread will be blocked until it returns.
+	:raises Exception: If `function` raises an exception, it is transparently re-raised so it can be handled on the calling thread.
+	:return: Return value from calling `function` with the given positional and keyword arguments.
+	"""
+	result: Any = None
+	exception: BaseException | None = None
+	event = threading.Event()
+
+	def functionWrapper():
+		nonlocal result, exception
+		try:
+			result = function(*args, **kwargs)
+		except Exception:  # noqa: BLE001
+			exception = sys.exception()
+		event.set()
+
+	if wx.IsMainThread():
+		functionWrapper()
+	else:
+		wx.CallAfter(functionWrapper)
+		event.wait()
+
+	if exception is not None:
+		raise exception
+	else:
+		return result
+
+
+def alwaysCallAfter[**P](func: Callable[P, Any]) -> Callable[P, None]:
+	"""Makes GUI updates thread-safe by running in the main thread.
+
+	Example:
+		@alwaysCallAfter
+		def updateLabel(text):
+			label.SetLabel(text)  # Safe GUI update from any thread
+
+	.. note::
+		The value returned by the decorated function will be discarded.
+	"""
+
+	@wraps(func)
+	def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+		wx.CallAfter(func, *args, **kwargs)
+
+	return wrapper

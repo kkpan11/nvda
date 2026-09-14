@@ -1,9 +1,9 @@
-# -*- coding: UTF-8 -*-
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2007-2023 NV Access Limited, Peter Vágner, Renaud Paquay, Babbage B.V.
+# Copyright (C) 2007-2026 NV Access Limited, Peter Vágner, Renaud Paquay, Babbage B.V.
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
+from collections.abc import Callable  # noqa: I001
 from enum import IntEnum, IntFlag
 import os
 import queue
@@ -22,7 +22,6 @@ from ctypes import (
 	POINTER,
 	byref,
 	cdll,
-	windll,
 	CFUNCTYPE,
 	WinError,
 	create_string_buffer,
@@ -30,6 +29,8 @@ from ctypes import (
 )
 from ctypes.wintypes import BOOL, HWND, WCHAR
 import time
+from winBindings.kernel32 import FreeLibrary
+from winBindings import user32
 import queueHandler
 from logHandler import log
 import winUser
@@ -39,7 +40,7 @@ import controlTypes
 import NVDAObjects.JAB
 import core
 import textUtils
-import NVDAHelper
+import NVDAState
 import config
 from utils.security import isRunningOnSecureDesktop
 
@@ -48,7 +49,7 @@ from utils.security import isRunningOnSecureDesktop
 A11Y_PROPS_PATH = os.path.expanduser(r"~\.accessibility.properties")
 #: The content of ".accessibility.properties" when JAB is enabled.
 A11Y_PROPS_CONTENT = (
-	"assistive_technologies=com.sun.java.accessibility.AccessBridge\n" "screen_magnifier_present=true\n"
+	"assistive_technologies=com.sun.java.accessibility.AccessBridge\nscreen_magnifier_present=true\n"
 )
 
 # Some utility functions to help with function defines
@@ -56,7 +57,7 @@ A11Y_PROPS_CONTENT = (
 
 def _errcheck(res, func, args):
 	if not res:
-		raise RuntimeError("Result %s" % res)
+		raise RuntimeError("Result %s" % res)  # noqa: UP031
 	return res
 
 
@@ -64,7 +65,7 @@ def _fixBridgeFunc(restype, name, *argtypes, **kwargs):
 	try:
 		func = getattr(bridgeDll, name)
 	except AttributeError:
-		log.warning("%s not found in Java Access Bridge dll" % name)
+		log.warning("%s not found in Java Access Bridge dll" % name)  # noqa: UP031
 		return
 	func.restype = restype
 	func.argtypes = argtypes
@@ -547,8 +548,47 @@ internalFunctionQueue = queue.Queue(1000)
 internalFunctionQueue.__name__ = "JABHandler.internalFunctionQueue"
 
 
-def internalQueueFunction(func, *args, **kwargs):
-	internalFunctionQueue.put_nowait((func, args, kwargs))
+def _releaseQueuedAccContext(func: Callable, args: tuple) -> None:
+	"""Release the JOBJECT64 accContext held by a queued JAB callback.
+
+	All handlers queued via :func:`internalQueueFunction` except
+	:func:`enterJavaWindow_helper` follow the ``(vmID, accContext, ...)``
+	convention where ``args[1]`` is a JOBJECT64 handle. This helper
+	releases that handle to prevent JOBJECT64 reference leaks when an
+	event is evicted from the queue or cannot be enqueued at all.
+	"""
+	if func is not enterJavaWindow_helper and len(args) >= 2:
+		bridgeDll.releaseJavaObject(args[0], args[1])
+
+
+def internalQueueFunction(func: Callable, *args, **kwargs) -> None:
+	"""Queue a function for execution on the main thread.
+
+	When the queue is full, the oldest event is evicted to make room.
+	JOBJECT64 handles owned by evicted or dropped events are released
+	via :func:`_releaseQueuedAccContext` to avoid leaks.
+
+	.. note::
+		All queued handler functions except :func:`enterJavaWindow_helper`
+		follow the convention ``(vmID, accContext, ...)``, where ``args[1]``
+		is a JOBJECT64 handle.  If a new handler with a different signature
+		is added, :func:`_releaseQueuedAccContext` must be updated.
+	"""
+	try:
+		internalFunctionQueue.put_nowait((func, args, kwargs))
+	except queue.Full:
+		try:
+			evictedFunc, evictedArgs, _evictedKwargs = internalFunctionQueue.get_nowait()
+			_releaseQueuedAccContext(evictedFunc, evictedArgs)
+		except queue.Empty:
+			pass
+		try:
+			internalFunctionQueue.put_nowait((func, args, kwargs))
+		except queue.Full:
+			_releaseQueuedAccContext(func, args)
+			log.debugWarning("JAB internal function queue full, failed to re-queue after eviction")
+			return
+		log.debugWarning("JAB internal function queue full, evicted oldest event")
 	core.requestPump()
 
 
@@ -572,7 +612,7 @@ def getWindowHandleFromAccContext(vmID, accContext):
 		return vmIDsToWindowHandles.get(vmID)
 
 
-class JABContext(object):
+class JABContext:
 	def __init__(self, hwnd=None, vmID=None, accContext=None):
 		if hwnd and not vmID:
 			vmID = c_long()
@@ -595,7 +635,7 @@ class JABContext(object):
 				log.debugWarning("Error releasing java object", exc_info=True)
 
 	def __eq__(self, jabContext):
-		if self.vmID == jabContext.vmID and bridgeDll.isSameObject(
+		if self.vmID == jabContext.vmID and bridgeDll.isSameObject(  # noqa: SIM103
 			self.vmID,
 			self.accContext,
 			jabContext.accContext,
@@ -610,7 +650,7 @@ class JABContext(object):
 		return super().__hash__()
 
 	def __ne__(self, jabContext):
-		if self.vmID != jabContext.vmID or not bridgeDll.isSameObject(
+		if self.vmID != jabContext.vmID or not bridgeDll.isSameObject(  # noqa: SIM103
 			self.vmID,
 			self.accContext,
 			jabContext.accContext,
@@ -647,7 +687,13 @@ class JABContext(object):
 		bridgeDll.getAccessibleTextSelectionInfo(self.vmID, self.accContext, byref(textSelectionInfo))
 		return textSelectionInfo
 
-	def getAccessibleTextRange(self, start, end):
+	def _javaGetAccessibleTextRange(self, start: int, end: int) -> str:
+		"""Helper method that performs the Java Access Bridge call to obtain the text of this object based on a (start, end) range.
+
+		:param start: The start index to get from, inclusive.
+		:param end: The end index to fetch to, exclusive.
+		:return: the text within the given indices as a string.
+		"""
 		length = (end + 1) - start
 		if length <= 0:
 			return ""
@@ -656,9 +702,35 @@ class JABContext(object):
 		bridgeDll.getAccessibleTextRange(self.vmID, self.accContext, start, end, buf, length)
 		return textUtils.getTextFromRawBytes(buf.raw, numChars=length, encoding=textUtils.WCHAR_ENCODING)
 
+	# Constant gotten from AccessBridgePackages.h,
+	# minus one to accommodate the null character
+	MAX_BUFFER_SIZE = 10239
+
+	def getAccessibleTextRange(self, start: int, end: int) -> str:
+		"""Obtains the text of this object based on a (start, end) range.
+		If the text is too large to fit in the buffer, this method will split the Java Access Bridge calls in chunks to get the whole text.
+
+		:param start: The start index to get from, inclusive.
+		:param end: The end index to fetch to, exclusive.
+		:return: the text within the given indices as a string.
+		"""
+		length = (end + 1) - start
+		if length < self.MAX_BUFFER_SIZE:
+			# Fast path: perform the Java Access Bridge call directly
+			return self._javaGetAccessibleTextRange(start, end)
+
+		text = []
+		while start <= end:
+			bufferSize = min(self.MAX_BUFFER_SIZE, length)
+			text.append(self._javaGetAccessibleTextRange(start, start + bufferSize - 1))
+			start += bufferSize
+			length -= bufferSize
+
+		return "".join(text)
+
 	def getAccessibleTextLineBounds(self, index):
 		index = max(index, 0)
-		log.debug("lineBounds: index %s" % index)
+		log.debug("lineBounds: index %s" % index)  # noqa: UP031
 		# Java returns end as the last character, not end as past the last character
 		startIndex = c_int()
 		endIndex = c_int()
@@ -671,7 +743,7 @@ class JABContext(object):
 		)
 		start = startIndex.value
 		end = endIndex.value
-		log.debug("line bounds: start %s, end %s" % (start, end))
+		log.debug("line bounds: start %s, end %s" % (start, end))  # noqa: UP031
 		if end < start or start < 0:
 			# Invalid or empty line.
 			return (0, -1)
@@ -688,7 +760,7 @@ class JABContext(object):
 			)
 			tempStart = max(startIndex.value, 0)
 			tempEnd = max(endIndex.value, 0)
-			log.debug("line bounds: tempStart %s, tempEnd %s" % (tempStart, tempEnd))
+			log.debug("line bounds: tempStart %s, tempEnd %s" % (tempStart, tempEnd))  # noqa: UP031
 			if tempStart > (index + 1):
 				# This line starts after the requested index, so set end to point at the line before.
 				end = tempStart - 1
@@ -706,13 +778,13 @@ class JABContext(object):
 			)
 			tempStart = max(startIndex.value, 0)
 			tempEnd = max(endIndex.value, 0)
-			log.debug("line bounds: tempStart %s, tempEnd %s" % (tempStart, tempEnd))
+			log.debug("line bounds: tempStart %s, tempEnd %s" % (tempStart, tempEnd))  # noqa: UP031
 			if tempEnd < (index - 1):
 				# This line ends before the requested index, so set start to point at the line after.
 				start = tempEnd + 1
 			else:
 				ok = True
-		log.debug("line bounds: returning %s, %s" % (start, end))
+		log.debug("line bounds: returning %s, %s" % (start, end))  # noqa: UP031
 		return (start, end)
 
 	def getAccessibleParentFromContext(self):
@@ -922,11 +994,19 @@ def event_gainFocus(vmID, accContext, hwnd):
 
 
 @AccessBridge_PropertyActiveDescendentChangeFP
-def internal_event_activeDescendantChange(vmID, event, source, oldDescendant, newDescendant):
+def internal_event_activeDescendantChange(
+	vmID: int,
+	event: int,
+	source: int,
+	oldDescendant: int,
+	newDescendant: int,
+) -> None:
 	hwnd = getWindowHandleFromAccContext(vmID, source)
 	sourceContext = JABContext(hwnd=hwnd, vmID=vmID, accContext=source)
 	if internal_hasFocus(sourceContext):
 		internalQueueFunction(event_gainFocus, vmID, newDescendant, hwnd)
+	else:
+		bridgeDll.releaseJavaObject(vmID, newDescendant)
 	for accContext in [event, oldDescendant]:
 		bridgeDll.releaseJavaObject(vmID, accContext)
 
@@ -936,12 +1016,23 @@ def internal_hasFocus(sourceContext):
 	if isinstance(focus, NVDAObjects.JAB.JAB) and focus.jabContext == sourceContext:
 		return True
 	ancestors = reversed(api.getFocusAncestors())
-	return any((isinstance(x, NVDAObjects.JAB.JAB) and x.jabContext == sourceContext for x in ancestors))
+	return any(isinstance(x, NVDAObjects.JAB.JAB) and x.jabContext == sourceContext for x in ancestors)
 
 
 @AccessBridge_PropertyNameChangeFP
-def event_nameChange(vmID, event, source, oldVal, newVal):
-	jabContext = JABContext(vmID=vmID, accContext=source)
+def internal_event_nameChange(
+	vmID: int,
+	event: int,
+	source: int,
+	oldVal: str | None,
+	newVal: str | None,
+) -> None:
+	internalQueueFunction(event_nameChange, vmID, source)
+	bridgeDll.releaseJavaObject(vmID, event)
+
+
+def event_nameChange(vmID: int, accContext: int) -> None:
+	jabContext = JABContext(vmID=vmID, accContext=accContext)
 	if jabContext.hwnd:
 		focus = api.getFocusObject()
 		obj = (
@@ -953,12 +1044,22 @@ def event_nameChange(vmID, event, source, oldVal, newVal):
 			eventHandler.queueEvent("nameChange", obj)
 	else:
 		log.debugWarning("Unable to obtain window handle for accessible context")
-	bridgeDll.releaseJavaObject(vmID, event)
 
 
 @AccessBridge_PropertyDescriptionChangeFP
-def event_descriptionChange(vmID, event, source, oldVal, newVal):
-	jabContext = JABContext(vmID=vmID, accContext=source)
+def internal_event_descriptionChange(
+	vmID: int,
+	event: int,
+	source: int,
+	oldVal: str | None,
+	newVal: str | None,
+) -> None:
+	internalQueueFunction(event_descriptionChange, vmID, source)
+	bridgeDll.releaseJavaObject(vmID, event)
+
+
+def event_descriptionChange(vmID: int, accContext: int) -> None:
+	jabContext = JABContext(vmID=vmID, accContext=accContext)
 	if jabContext.hwnd:
 		focus = api.getFocusObject()
 		obj = (
@@ -970,12 +1071,22 @@ def event_descriptionChange(vmID, event, source, oldVal, newVal):
 			eventHandler.queueEvent("descriptionChange", obj)
 	else:
 		log.debugWarning("Unable to obtain window handle for accessible context")
-	bridgeDll.releaseJavaObject(vmID, event)
 
 
 @AccessBridge_PropertyValueChangeFP
-def event_valueChange(vmID, event, source, oldVal, newVal):
-	jabContext = JABContext(vmID=vmID, accContext=source)
+def internal_event_valueChange(
+	vmID: int,
+	event: int,
+	source: int,
+	oldVal: str | None,
+	newVal: str | None,
+) -> None:
+	internalQueueFunction(event_valueChange, vmID, source)
+	bridgeDll.releaseJavaObject(vmID, event)
+
+
+def event_valueChange(vmID: int, accContext: int) -> None:
+	jabContext = JABContext(vmID=vmID, accContext=accContext)
 	if jabContext.hwnd:
 		focus = api.getFocusObject()
 		obj = (
@@ -987,7 +1098,6 @@ def event_valueChange(vmID, event, source, oldVal, newVal):
 			eventHandler.queueEvent("valueChange", obj)
 	else:
 		log.debugWarning("Unable to obtain window handle for accessible context")
-	bridgeDll.releaseJavaObject(vmID, event)
 
 
 @AccessBridge_PropertyStateChangeFP
@@ -1060,7 +1170,7 @@ def enterJavaWindow_helper(hwnd):
 	while time.time() < timeout and not eventHandler.isPendingEvents("gainFocus"):
 		try:
 			bridgeDll.getAccessibleContextWithFocus(hwnd, byref(vmID), byref(accContext))
-		except:  # noqa: E722
+		except:  # noqa: E722, S110
 			pass
 		if vmID and accContext:
 			break
@@ -1086,7 +1196,7 @@ def isJavaWindow(hwnd):
 
 def isBridgeEnabled():
 	try:
-		data = open(A11Y_PROPS_PATH, "rt").read()
+		data = open(A11Y_PROPS_PATH, "rt").read()  # noqa: SIM115
 	except OSError:
 		return False
 	return data == A11Y_PROPS_CONTENT
@@ -1094,7 +1204,7 @@ def isBridgeEnabled():
 
 def enableBridge():
 	try:
-		props = open(A11Y_PROPS_PATH, "wt")
+		props = open(A11Y_PROPS_PATH, "wt")  # noqa: SIM115
 		props.write(A11Y_PROPS_CONTENT)
 		log.info("Enabled Java Access Bridge for user")
 	except OSError:
@@ -1104,10 +1214,8 @@ def enableBridge():
 def initialize():
 	global bridgeDll, isRunning
 	try:
-		bridgeDll = cdll.LoadLibrary(
-			os.path.join(NVDAHelper.versionedLibPath, "windowsaccessbridge-32.dll"),
-		)
-	except WindowsError:
+		bridgeDll = cdll.LoadLibrary(NVDAState.ReadPaths.javaAccessBridgeDLL)
+	except OSError:
 		raise NotImplementedError("dll not available")
 	_fixBridgeFuncs()
 	if (
@@ -1116,18 +1224,18 @@ def initialize():
 	):
 		enableBridge()
 	# Accept wm_copydata and any wm_user messages from other processes even if running with higher privileges
-	if not windll.user32.ChangeWindowMessageFilter(winUser.WM_COPYDATA, winUser.MSGFLT.ALLOW):
+	if not user32.ChangeWindowMessageFilter(winUser.WM_COPYDATA, winUser.MSGFLT.ALLOW):
 		raise WinError()
 	for msg in range(winUser.WM_USER + 1, 0xFFFF):
-		if not windll.user32.ChangeWindowMessageFilter(msg, winUser.MSGFLT.ALLOW):
+		if not user32.ChangeWindowMessageFilter(msg, winUser.MSGFLT.ALLOW):
 			raise WinError()
 	bridgeDll.Windows_run()
 	# Register java events
 	bridgeDll.setFocusGainedFP(internal_event_focusGained)
 	bridgeDll.setPropertyActiveDescendentChangeFP(internal_event_activeDescendantChange)
-	bridgeDll.setPropertyNameChangeFP(event_nameChange)
-	bridgeDll.setPropertyDescriptionChangeFP(event_descriptionChange)
-	bridgeDll.setPropertyValueChangeFP(event_valueChange)
+	bridgeDll.setPropertyNameChangeFP(internal_event_nameChange)
+	bridgeDll.setPropertyDescriptionChangeFP(internal_event_descriptionChange)
+	bridgeDll.setPropertyValueChangeFP(internal_event_valueChange)
 	bridgeDll.setPropertyStateChangeFP(internal_event_stateChange)
 	bridgeDll.setPropertyCaretChangeFP(internal_event_caretChange)
 	isRunning = True
@@ -1144,11 +1252,14 @@ def terminate():
 		return
 	bridgeDll.setFocusGainedFP(None)
 	bridgeDll.setPropertyActiveDescendentChangeFP(None)
+	bridgeDll.setPropertyNameChangeFP(None)
+	bridgeDll.setPropertyDescriptionChangeFP(None)
+	bridgeDll.setPropertyValueChangeFP(None)
 	bridgeDll.setPropertyStateChangeFP(None)
 	bridgeDll.setPropertyCaretChangeFP(None)
 	h = bridgeDll._handle
 	bridgeDll = None
-	windll.kernel32.FreeLibrary(h)
+	FreeLibrary(h)
 	isRunning = False
 
 
@@ -1187,7 +1298,7 @@ JABKeyModifiersToLabels = {
 def _getKeyLabels(modifiers, character):
 	keys = [v for m, v in JABKeyModifiersToLabels.items() if modifiers & m]
 	if modifiers & AccessibleKeystroke.FKEY:
-		keys.append("F{}".format(ord(character)))
+		keys.append(f"F{ord(character)}")
 	elif modifiers & AccessibleKeystroke.CONTROLCODE:
 		keys.append(JABKeyControlCodesToLabels.get(ord(character), character))
 	else:

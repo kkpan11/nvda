@@ -1,5 +1,5 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2022 NV Access Limited
+# Copyright (C) 2022-2025 NV Access Limited
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -14,7 +14,7 @@ Used to:
 - ensure object navigation cannot occur outside of the lockscreen
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 import ctypes
 from contextlib import contextmanager
 from ctypes.wintypes import (
@@ -22,10 +22,7 @@ from ctypes.wintypes import (
 	LPWSTR,
 )
 import enum
-from typing import (
-	Generator,
-	Optional,
-)
+from collections.abc import Generator
 
 from baseObject import AutoPropertyObject
 from logHandler import log
@@ -65,7 +62,7 @@ https://docs.microsoft.com/en-us/windows/win32/sync/synchronization-object-secur
 Unused in NVDA core, duplicate of winKernel.SYNCHRONIZE.
 """
 
-_lockStateTracker: Optional["_WindowsLockedState"] = None
+_lockStateTracker: _WindowsLockedState | None = None
 """
 Caches the Windows lock state as an auto property object.
 """
@@ -164,14 +161,6 @@ def isLockScreenModeActive() -> bool:
 		# Use secure mode instead if on the secure desktop
 		return False
 
-	import winVersion
-
-	if winVersion.getWinVer() < winVersion.WIN10:
-		# On Windows 8 and Earlier, the lock screen runs on
-		# the secure desktop.
-		# Lock screen mode is not supported on these Windows versions.
-		return False
-
 	return _isWindowsLocked()
 
 
@@ -187,8 +176,7 @@ def _isWindowsLocked_checkViaSessionQuery() -> bool:
 		return False
 	if sessionQueryLockState == WTS_LockState.WTS_SESSIONSTATE_UNKNOWN:
 		log.error(
-			"Unable to determine lock state via Session Query."
-			f" Lock state value: {sessionQueryLockState!r}",
+			f"Unable to determine lock state via Session Query. Lock state value: {sessionQueryLockState!r}",
 		)
 		return False
 	return sessionQueryLockState == WTS_LockState.WTS_SESSIONSTATE_LOCK
@@ -198,7 +186,7 @@ _WTS_INFO_POINTER_T = ctypes.POINTER(WTSINFOEXW)
 
 
 @contextmanager
-def WTSCurrentSessionInfoEx() -> Generator[_WTS_INFO_POINTER_T, None, None]:
+def WTSCurrentSessionInfoEx() -> Generator[_WTS_INFO_POINTER_T]:
 	"""Context manager to get the WTSINFOEXW for the current server/session or raises a RuntimeError.
 	Handles freeing the memory when usage is complete.
 	@raises RuntimeError: On failure
@@ -214,7 +202,7 @@ def WTSCurrentSessionInfoEx() -> Generator[_WTS_INFO_POINTER_T, None, None]:
 		)
 
 
-def _getCurrentSessionInfoEx() -> Optional[_WTS_INFO_POINTER_T]:
+def _getCurrentSessionInfoEx() -> _WTS_INFO_POINTER_T | None:
 	"""
 	Gets the WTSINFOEXW for the current server/session or raises a RuntimeError
 	on failure.

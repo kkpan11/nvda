@@ -1,65 +1,30 @@
+#!/usr/bin/env python3
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2010-2024 NV Access Limited, James Teh, Michael Curran, Peter Vágner, Joseph Lee,
+# Copyright (C) 2010-2025 NV Access Limited, James Teh, Michael Curran, Peter Vágner, Joseph Lee,
 # Reef Turner, Babbage B.V., Leonard de Ruijter, Łukasz Golonka, Accessolutions, Julien Cochuyt,
 # Cyrille Bougot
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
-import multiprocessing
+import multiprocessing  # noqa: I001
 import os
 import platform
 import sys
+from pathlib import Path
 
 
-# Ensure we are inside the Python virtual environment.
-nvdaVenv = os.getenv("NVDA_VENV")
+# Ensure we are inside the Python virtual environment, and that it is started with uv
 virtualEnv = os.getenv("VIRTUAL_ENV")
-if not virtualEnv or not os.path.isdir(virtualEnv):
+uv = os.getenv("uv")
+if not virtualEnv or not uv or Path.cwd() != Path(virtualEnv).parent:
 	print(
-		"Error: SCons cannot detect the NVDA build system Python virtual environment.\n"
-		"SCons must be executed using scons.bat in the root of this repository."
+		"Error: SCons was started outside NVDA's build system Python virtual environment.\n"
+		"SCons must be executed using scons.bat in the root of this repository.",
 	)
 	sys.exit(1)
-if nvdaVenv != virtualEnv:
-	print("Warning: SCons launched within a custom Python virtual environment.")
 
-# Variables for storing required version of Python, and the version which is used to run this script.
-requiredPythonMajor = "3"
-requiredPythonMinor = "11"
-requiredPythonArchitecture = "32bit"
-installedPythonMajor = str(sys.version_info.major)
-installedPythonMinor = str(sys.version_info.minor)
-installedPythonArchitecture = platform.architecture()[0]
-# Ensure that we are running with required version of Python, otherwise inform the user and exit.
-if (
-	installedPythonArchitecture != requiredPythonArchitecture
-	or installedPythonMajor != requiredPythonMajor
-	or installedPythonMinor != requiredPythonMinor
-):
-	unsupportedPythonMsg = (
-		"This script is started with Python %s.%s %s, however to build NVDA you have to use Python %s.%s %s.\n"
-		"Please install the needed version of Python and launch SCons again, or if you have multiple "
-		"versions of Python installed start this script with required version explicitly."
-	)
-	raise RuntimeError(
-		unsupportedPythonMsg
-		% (
-			installedPythonMajor,
-			installedPythonMinor,
-			installedPythonArchitecture,
-			requiredPythonMajor,
-			requiredPythonMinor,
-			requiredPythonArchitecture,
-		)
-	)
-sourceEnvPath = os.path.abspath(os.path.join(Dir(".").srcnode().path, "source"))
-sys.path.append(sourceEnvPath)
-import sourceEnv  # noqa: E402
-
-sys.path.remove(sourceEnvPath)
-import time  # noqa: E402
-import importlib.util  # noqa: E402
-import winreg  # noqa: E402
+import time  # noqa: I001
+import importlib.util
 
 
 def recursiveCopy(env, targetDir, sourceDir):
@@ -78,11 +43,12 @@ def recursiveCopy(env, targetDir, sourceDir):
 
 
 # Import NVDA's versionInfo module.
-import gettext  # noqa: E402
+import gettext
 
 gettext.install("nvda")
 sys.path.append("source")
-import versionInfo  # noqa: E402
+import buildVersion
+import versionInfo
 
 del sys.path[-1]
 
@@ -93,14 +59,14 @@ XGETTEXT = os.path.abspath(os.path.join("miscDeps", "tools", "xgettext.exe"))
 
 
 vars = Variables()
-vars.Add("version", "The version of this build", versionInfo.version)
+vars.Add("version", "The version of this build", buildVersion.version)
 vars.Add("version_build", "A unique number for this build.", "0")
 vars.Add(BoolVariable("release", "Whether this is a release version", False))
-vars.Add("publisher", "The publisher of this build", versionInfo.publisher)
+vars.Add("publisher", "The publisher of this build", buildVersion.publisher)
 vars.Add(
 	"updateVersionType",
 	"The version type for which to check for updates",
-	versionInfo.updateVersionType or "",
+	buildVersion.updateVersionType or "",
 )
 vars.Add(
 	PathVariable(
@@ -108,7 +74,7 @@ vars.Add(
 		"The certificate file with which to sign executables",
 		"",
 		lambda key, val, env: not val or PathVariable.PathIsFile(key, val, env),
-	)
+	),
 )
 vars.Add("certPassword", "The password for the private key in the signing certificate", "")
 vars.Add(
@@ -123,7 +89,7 @@ vars.Add(
 		"The directory where the final built archives and such will be placed",
 		"output",
 		PathVariable.PathIsDirCreate,
-	)
+	),
 )
 vars.Add(
 	ListVariable(
@@ -131,7 +97,7 @@ vars.Add(
 		"a list of debugging features you require",
 		"none",
 		["debugCRT", "RTC", "analyze"],
-	)
+	),
 )
 vars.Add(
 	EnumVariable(
@@ -139,7 +105,7 @@ vars.Add(
 		"The level of logging you wish to see, lower is more verbose",
 		"15",
 		allowed_values=[str(x) for x in range(60)],
-	)
+	),
 )
 
 # Base environment for this and sub sconscripts
@@ -149,12 +115,12 @@ env = Environment(
 	tools=[
 		"textfile",
 		"gettextTool",
-		"md2html",
 		"doxygen",
 		"recursiveInstall",
 		"m4",
 	],
 )
+
 
 # speed up subsequent runs by checking timestamps of targets and dependencies, and only using md5 if timestamps differ.
 env.Decider("MD5-timestamp")
@@ -190,16 +156,13 @@ env.AddMethod(recursiveCopy)
 # Check for any unknown variables
 unknown = vars.UnknownVariables().keys()
 if len(unknown) > 0:
-	print("Unknown commandline variables: %s" % unknown)
+	print("Unknown commandline variables: %s" % unknown)  # noqa: UP031
 	Exit(1)
 
-# Ensure that any Python subprocesses (such as for py2exe) can find our Python directory in miscDeps
-env["ENV"]["PYTHONPATH"] = ";".join(sourceEnv.PYTHON_DIRS)
-
 env["copyright"] = versionInfo.copyright
-env["version_year"] = versionInfo.version_year
-env["version_major"] = versionInfo.version_major
-env["version_minor"] = versionInfo.version_minor
+env["version_year"] = buildVersion.version_year
+env["version_major"] = buildVersion.version_major
+env["version_minor"] = buildVersion.version_minor
 version = env["version"]
 version_build = env["version_build"]
 release = env["release"]
@@ -213,23 +176,25 @@ sourceDir = env.Dir("source")
 Export("sourceDir")
 clientDir = Dir("extras/controllerClient")
 Export("clientDir")
-sourceLibDir = sourceDir.Dir("lib")
+sourceLibDir = sourceDir.Dir("lib/x86")
 Export("sourceLibDir")
 sourceTypelibDir = sourceDir.Dir("typelibs")
 Export("sourceTypelibDir")
-sourceLibDir64 = sourceDir.Dir("lib64")
+sourceLibDir64 = sourceDir.Dir("lib/x64")
 Export("sourceLibDir64")
-sourceLibDirArm64 = sourceDir.Dir("libArm64")
+sourceLibDirArm64 = sourceDir.Dir("lib/arm64")
 Export("sourceLibDirArm64")
+sourceLibDirArm64EC = sourceDir.Dir("lib/arm64ec")
+Export("sourceLibDirArm64EC")
 buildDir = Dir("build")
 outFilePrefix = "nvda{type}_{version}".format(type="" if release else "_snapshot", version=version)
 Export("outFilePrefix")
 outputDir = Dir(env["outputDir"])
 Export("outputDir")
 
-assert not (
-	apiSigningToken and certFile
-), "Cannot specify signing with both API token (cloud) and local certificate"
+assert not (apiSigningToken and certFile), (
+	"Cannot specify signing with both API token (cloud) and local certificate"
+)
 if apiSigningToken:
 	# Code signing with SignPath HSM
 	def signExecApi(target, source, env):
@@ -238,7 +203,9 @@ if apiSigningToken:
 		retval = 1  # error value
 		for targetFile in target:
 			if (abspath := targetFile.abspath).endswith((".exe", ".dll")):
-				ps_cmd = f"powershell -File appveyor\scripts\sign.ps1 -ApiToken {apiSigningToken} -FileToSign {abspath}"
+				ps_cmd = (
+					rf"PowerShell -File ci\scripts\sign.ps1 -ApiToken {apiSigningToken} -FileToSign {abspath}"
+				)
 				if (retval := env.Execute(ps_cmd, shell=True)) != 0:
 					print(f"Error signing file: {abspath}")
 		return retval
@@ -272,12 +239,18 @@ archTools = ["default", "midl", "msrpc"]
 env32 = env.Clone(TARGET_ARCH="x86", tools=archTools)
 env64 = env.Clone(TARGET_ARCH="x86_64", tools=archTools)
 envArm64 = env.Clone(TARGET_ARCH="arm64", tools=archTools)
+envArm64EC = envArm64.Clone()
+envArm64EC["isArm64EC"] = True
 # Hack around odd bug where some tool [after] msvc states that static and shared objects are different
 env32["STATIC_AND_SHARED_OBJECTS_ARE_THE_SAME"] = 1
 env64["STATIC_AND_SHARED_OBJECTS_ARE_THE_SAME"] = 1
 envArm64["STATIC_AND_SHARED_OBJECTS_ARE_THE_SAME"] = 1
+envArm64EC["STATIC_AND_SHARED_OBJECTS_ARE_THE_SAME"] = 1
 
-env = env32
+if platform.architecture()[0].startswith("64"):
+	env = env64
+else:
+	env = env32
 
 projectRCSubstDict = {
 	"%version_year%": env["version_year"],
@@ -287,25 +260,34 @@ projectRCSubstDict = {
 	"%copyright%": env["copyright"],
 	"%publisher%": env["publisher"],
 	"%version%": env["version"],
-	"%productName%": "%s (%s)" % (versionInfo.name, versionInfo.longName),
+	"%productName%": "%s (%s)" % (buildVersion.name, versionInfo.longName),  # noqa: UP031
 }
 resFile = env.RES(
 	target="build/nvda.res",
 	source=env.Substfile(
-		target="build/nvda.rc", source="nvdaHelper/nvda.rc.subst", SUBST_DICT=projectRCSubstDict
+		target="build/nvda.rc",
+		source="nvdaHelper/nvda.rc.subst",
+		SUBST_DICT=projectRCSubstDict,
 	),
 )
 env32["projectResFile"] = resFile
 env64["projectResFile"] = resFile
 envArm64["projectResFile"] = resFile
+envArm64EC["projectResFile"] = resFile
 
 # Fill sourceDir with anything provided for it by miscDeps
 env.recursiveCopy(sourceDir, Dir("miscdeps/source"))
+
 # Copy in some other dependencies.
-jabDll = "windowsaccessbridge-32.dll"
-Command(
-	sourceLibDir.File(jabDll), env.Dir("#include/javaAccessBridge32").File(jabDll), Copy("$TARGET", "$SOURCE")
-)
+for targetDir, jabDll in (
+	(sourceLibDir, "windowsaccessbridge-32.dll"),
+	(sourceLibDir64, "windowsaccessbridge-64.dll"),
+):
+	Command(
+		targetDir.File("windowsaccessbridge.dll"),
+		env.Dir("#include/javaAccessBridge32").File(jabDll),
+		Copy("$TARGET", "$SOURCE"),
+	)
 
 env.SConscript("source/comInterfaces_sconscript", exports=["env"])
 
@@ -325,6 +307,15 @@ envArm64.SConscript(
 	exports={"env": envArm64, "clientInstallDir": clientDir.Dir("arm64"), "libInstallDir": sourceLibDirArm64},
 	variant_dir="build/arm64",
 )
+envArm64EC.SConscript(
+	"nvdaHelper/archBuild_sconscript",
+	exports={
+		"env": envArm64EC,
+		"clientInstallDir": clientDir.Dir("arm64ec"),
+		"libInstallDir": sourceLibDirArm64EC,
+	},
+	variant_dir="build/arm64ec",
+)
 
 # Allow all NVDA's gettext po files to be compiled in source/locale
 for po in env.Glob(sourceDir.path + "/locale/*/lc_messages/*.po"):
@@ -332,30 +323,62 @@ for po in env.Glob(sourceDir.path + "/locale/*/lc_messages/*.po"):
 
 styles = os.path.join(userDocsDir.path, "styles.css")
 numberedHeadingsStyle = os.path.join(userDocsDir.path, "numberedHeadings.css")
+logo = os.path.join(sourceDir.path, "images", "nvda.ico")
+favicon = env.Command(
+	outputDir.File("favicon.ico"),
+	logo,
+	Copy("$TARGET", "$SOURCE"),
+)
 
+# Create Non-english md files in user_docs from localized xliff and English skel files
+for xliffFile in env.Glob(os.path.join(userDocsDir.path, "*", "*.xliff")):
+	lang = os.path.split(os.path.dirname(xliffFile.path))[-1]
+	if lang == "en":
+		continue
+	mdFile = os.path.splitext(xliffFile.path)[0] + ".md"
+	env.Command(
+		mdFile,
+		xliffFile,
+		[f'@"{sys.executable}" source/markdownTranslate.py generateMarkdown -x "{xliffFile}" -o "{mdFile}"'],
+	)
 # Allow all markdown files to be converted to html in user_docs
 for mdFile in env.Glob(os.path.join(userDocsDir.path, "*", "*.md")):
-	htmlFile = env.md2html(mdFile)
+	# first substitute some variables such as NVDA version and URL into the markdown file
+	mdFileSub = env.Substfile(
+		target=mdFile.abspath.replace(".md", ".md.sub"),
+		source=mdFile,
+		SUBST_DICT={
+			"NVDA_VERSION": env["version"],
+			"NVDA_URL": buildVersion.url,
+			"NVDA_COPYRIGHT_YEARS": buildVersion.copyrightYears,
+		},
+	)
+	lang = os.path.split(os.path.dirname(mdFile.path))[-1]
+	docType = os.path.basename(mdFile.path).split(".")[0]
+	htmlFile = env.Command(
+		target=mdFile.abspath.replace(".md", ".html"),
+		source=mdFileSub,
+		action=[f'@"{sys.executable}" source/md2html.py -l {lang} -t {docType} "$SOURCE" "$TARGET"'],
+	)
 	styleInstallPath = os.path.dirname(mdFile.abspath)
 	installedStyle = env.Install(styleInstallPath, styles)
 	installedHeadingsStyle = env.Install(styleInstallPath, numberedHeadingsStyle)
+	installedLogo = env.Install(styleInstallPath, favicon)
 	env.Depends(
 		htmlFile,
-		[
-			styles,
-			installedStyle,
-			numberedHeadingsStyle,
-			installedHeadingsStyle,
-		],
+		[styles, installedStyle, numberedHeadingsStyle, installedHeadingsStyle, favicon, installedLogo],
 	)
 	env.Depends(htmlFile, mdFile)
 
 # Create key commands files
-for userGuideFile in env.Glob(os.path.join(userDocsDir.path, "*", "userGuide.md")):
-	keyCommandsHtmlFile = env.md2html(
-		userGuideFile.abspath.replace("userGuide.md", "keyCommands.html"), userGuideFile
+for userGuideFileSub in env.Glob(os.path.join(userDocsDir.path, "*", "userGuide.md.sub")):
+	lang = os.path.split(os.path.dirname(userGuideFileSub.path))[-1]
+	keyCommandsHtmlFile = env.Command(
+		target=userGuideFileSub.abspath.replace("userGuide.md.sub", "keyCommands.html"),
+		source=userGuideFileSub,
+		action=[f'@"{sys.executable}" source/md2html.py -l {lang} -t keyCommands "$SOURCE" "$TARGET"'],
 	)
-	env.Depends(keyCommandsHtmlFile, userGuideFile)
+	env.Depends(keyCommandsHtmlFile, userGuideFileSub)
 
 # Build unicode CLDR dictionaries
 env.SConscript("cldrDict_sconscript", exports=["env", "sourceDir"])
@@ -370,20 +393,17 @@ def NVDADistGenerator(target, source, env, for_signature):
 	updateVersionType = env["updateVersionType"] or None
 	# Any '\n' characters written are translated to the system default line separator, os.linesep.
 	action = [
-		lambda target, source, env: open(buildVersionFn, "w", encoding="utf-8").write(
-			"version = {version!r}\n"
-			"publisher = {publisher!r}\n"
-			"updateVersionType = {updateVersionType!r}\n"
-			"version_build = {version_build!r}\n".format(
-				version=version,
-				publisher=publisher,
-				updateVersionType=updateVersionType,
-				version_build=version_build,
+		lambda target, source, env: (
+			open(buildVersionFn, "w", encoding="utf-8").write(  # noqa: SIM115
+				f"version = {version!r}\n"
+				f"publisher = {publisher!r}\n"
+				f"updateVersionType = {updateVersionType!r}\n"
+				f"version_build = {version_build!r}\n",
 			)
-		)
-		# In Python 3 write returns the number of characters written,
-		# which scons treats as an error code.
-		and None
+			# In Python 3 write returns the number of characters written,
+			# which scons treats as an error code.
+			and None
+		),
 	]
 
 	buildCmd = ["cd", source[0].path, "&&", sys.executable]
@@ -397,39 +417,20 @@ def NVDADistGenerator(target, source, env, for_signature):
 
 	action.append(buildCmd)
 
-	# #10031: Apps written in Python 3 require Universal CRT to be installed. We cannot assume users have it on their systems.
-	# Therefore , copy required libraries from Windows 10 SDK.
-	try:
-		with winreg.OpenKey(
-			winreg.HKEY_LOCAL_MACHINE,
-			r"SOFTWARE\Microsoft\Microsoft SDKs\Windows\v10.0",
-			0,
-			winreg.KEY_READ | winreg.KEY_WOW64_32KEY,
-		) as SDKKey:
-			sdk_installationFolder = winreg.QueryValueEx(SDKKey, "InstallationFolder")[0]
-			sdk_productVersion = winreg.QueryValueEx(SDKKey, "ProductVersion")[0]
-	except WindowsError:
-		raise RuntimeError("Windows 10 SDK not found")
-	# The Universal CRT should be in an SDK version-specific directory
-	# But usually has a '.0' appended after the productVersion found in the registry.
-	# E.g. 10.0.1941 might e actually 10.0.1941.0.
-	# Thus try both.
-	CRTDir = os.path.join(sdk_installationFolder, "Redist", sdk_productVersion + ".0", "ucrt", "DLLs", "x86")
-	if not os.path.isdir(CRTDir):
-		CRTDir = os.path.join(sdk_installationFolder, "Redist", sdk_productVersion, "ucrt", "DLLs", "x86")
-		if not os.path.isdir(CRTDir):
-			raise RuntimeError(f"Could not locate CRT dlls in SDK at {CRTDir}")
-	with os.scandir(CRTDir) as dir:
-		for file in dir:
-			if file.name.endswith(".dll") and file.is_file():
-				action.append(Copy(target[0], file.path))
-
 	if certFile or apiSigningToken:
-		for prog in "nvda_noUIAccess.exe", "nvda_uiAccess.exe", "nvda_slave.exe":
+		executablesToSign = (
+			"nvda_noUIAccess.exe",
+			"nvda_uiAccess.exe",
+			"nvda_slave.exe",
+			"l10nUtil.exe",
+			os.path.join("lib", version, "x86", "synthDriverHost-runtime", "nvda_synthDriverHost.exe"),
+		)
+		for prog in executablesToSign:
+			path = os.path.join(target[0].abspath, prog)
 			action.append(
-				lambda target, source, env, progByVal=prog: env["signExec"](
-					[target[0].File(progByVal)], source, env
-				)
+				lambda target, source, env, pathByVal=path: (
+					env["signExec"]([File(pathByVal)], source, env) if os.path.isfile(pathByVal) else None
+				),
 			)
 
 	action.extend((Delete(buildVersionFn), Delete(importlib.util.cache_from_source(buildVersionFn))))
@@ -454,7 +455,7 @@ def ZipArchiveAction(target, source, env):
 				arcName = arcName.replace(".." + os.path.sep, "")
 			return "" if arcName == "." else arcName
 	else:
-		getArcName = lambda origName: "" if origName == "." else origName  # noqa: E731
+		getArcName = lambda origName: "" if origName == "." else origName
 
 	# Nasty hack to make zipfile use best compression, since it isn't configurable.
 	# Tried setting memlevel to 9 as well, but it made compression slightly worse.
@@ -502,18 +503,23 @@ uninstGen = env.Command(
 			'/DVERSION_MAJOR="$version_major"',
 			'/DVERSION_MINOR="$version_minor"',
 			'/DVERSION_BUILD="$version_build"',
-			"/DUNINSTEXE=%s" % uninstFile.abspath,
+			"/DUNINSTEXE=%s" % uninstFile.abspath,  # noqa: UP031
 			"/DINSTEXE=${TARGET.abspath}",
 			"$SOURCE",
-		]
+		],
 	],
 )
 uninstaller = env.Command(uninstFile, uninstGen, [uninstGen])
 if certFile or apiSigningToken:
 	env.AddPostAction(uninstaller, [env["signExec"]])
 
+devDocTargets = env.SConscript(
+	"projectDocs/dev/developerGuide/sconscript",
+	exports=["env", "outputDir", "sourceDir", "userDocsDir"],
+)
 dist = env.NVDADist("dist", [sourceDir, userDocsDir], uiAccess=bool(certFile) or bool(apiSigningToken))
 env.Depends(dist, uninstaller)
+env.Depends(dist, devDocTargets)
 # dist will always be considered obsolete
 AlwaysBuild(dist)
 # Dir node targets don't get cleaned, so cleaning of the dist nodes has to be explicitly specified.
@@ -522,7 +528,7 @@ env.Clean(dist, dist)
 env.Clean([dist], buildDir)
 
 launcher = env.Command(
-	outputDir.File("%s.exe" % outFilePrefix),
+	outputDir.File("%s.exe" % outFilePrefix),  # noqa: UP031
 	["launcher/nvdaLauncher.nsi", dist],
 	[
 		[
@@ -538,7 +544,7 @@ launcher = env.Command(
 			"/DNVDADistDir=${SOURCES[1].abspath}",
 			"/DLAUNCHEREXE=${TARGET.abspath}",
 			"$SOURCE",
-		]
+		],
 	],
 )
 if certFile or apiSigningToken:
@@ -546,20 +552,25 @@ if certFile or apiSigningToken:
 env.Alias("launcher", launcher)
 
 clientArchive = env.ZipArchive(
-	outputDir.File("%s_controllerClient.zip" % outFilePrefix), clientDir, relativeTo=clientDir
+	outputDir.File("%s_controllerClient.zip" % outFilePrefix),  # noqa: UP031
+	clientDir,
+	relativeTo=clientDir,
 )
 env.Alias("client", clientArchive)
 
 outputStylesFile = env.Command(
-	outputDir.File("styles.css"), userDocsDir.File("styles.css"), Copy("$TARGET", "$SOURCE")
+	outputDir.File("styles.css"),
+	userDocsDir.File("styles.css"),
+	Copy("$TARGET", "$SOURCE"),
 )
 outputHeadingStylesFile = env.Command(
 	outputDir.File("numberedHeadings.css"),
 	userDocsDir.File("numberedHeadings.css"),
 	Copy("$TARGET", "$SOURCE"),
 )
+outputLogoFile = env.Command(outputDir.File("favicon.ico"), logo, Copy("$TARGET", "$SOURCE"))
 changesFile = env.Command(
-	outputDir.File("%s_changes.html" % outFilePrefix),
+	outputDir.File("%s_changes.html" % outFilePrefix),  # noqa: UP031
 	userDocsDir.File("en/changes.html"),
 	Copy("$TARGET", "$SOURCE"),
 )
@@ -567,13 +578,17 @@ env.Depends(changesFile, outputStylesFile)
 env.Alias("changes", changesFile)
 
 userGuideFile = env.Command(
-	outputDir.File("userGuide.html"), userDocsDir.File("en/userGuide.html"), Copy("$TARGET", "$SOURCE")
+	outputDir.File("userGuide.html"),
+	userDocsDir.File("en/userGuide.html"),
+	Copy("$TARGET", "$SOURCE"),
 )
 env.Depends(userGuideFile, outputStylesFile)
 env.Alias("userGuide", userGuideFile)
 
 keyCommandsFile = env.Command(
-	outputDir.File("keyCommands.html"), userDocsDir.File("en/keyCommands.html"), Copy("$TARGET", "$SOURCE")
+	outputDir.File("keyCommands.html"),
+	userDocsDir.File("en/keyCommands.html"),
+	Copy("$TARGET", "$SOURCE"),
 )
 env.Depends(keyCommandsFile, outputStylesFile)
 env.Depends(keyCommandsFile, userGuideFile)
@@ -601,7 +616,7 @@ def makePot(target, source, env):
 					"-o",
 					target[0].abspath,
 					"--package-name",
-					versionInfo.name,
+					buildVersion.name,
 					"--package-version",
 					version,
 					"--foreign-user",
@@ -614,8 +629,8 @@ def makePot(target, source, env):
 					"--language=python",
 					# Too many files to list on commandline, use a file list instead.
 					f"--files-from={potSourceFileList.abspath}",
-				]
-			]
+				],
+			],
 		)
 		!= 0
 	):
@@ -623,11 +638,11 @@ def makePot(target, source, env):
 
 	# Tweak the headers.
 	potFn = str(target[0])
-	tmpFn = "%s.tmp" % potFn
+	tmpFn = "%s.tmp" % potFn  # noqa: UP031
 	with open(potFn, "rt", encoding="utf-8") as inp, open(tmpFn, "wt", encoding="utf-8") as out:
 		for lineNum, line in enumerate(inp):
 			if lineNum == 1:
-				line = "# %s\n" % versionInfo.copyright
+				line = "# %s\n" % versionInfo.copyright  # noqa: UP031
 			elif lineNum == 2:
 				# Delete line.
 				continue
@@ -636,9 +651,6 @@ def makePot(target, source, env):
 			out.write(line)
 	os.remove(potFn)
 	os.rename(tmpFn, potFn)
-
-
-env.SConscript("projectDocs/dev/developerGuide/sconscript", exports=["env", "outputDir", "sourceDir"])
 
 
 def getSubDirs(path):
@@ -656,7 +668,7 @@ potSourceFiles = [
 	if not (
 		# Exclude comInterfaces, since these don't contain translatable strings
 		# and they cause unknown encoding warnings.
-		recurseDirs.startswith(r"source\comInterfaces")
+		recurseDirs.startswith(r"source\comInterfaces")  # noqa: PIE810
 		# Exclude userConfig folder which does not contain NVDA code but may contain gettext call without
 		# translator comments in add-ons or scratchpad, triggering false positive for checkpot script.
 		or recurseDirs.startswith(r"source\userConfig")
@@ -674,7 +686,7 @@ env.Alias("pot", pot)
 symbolsList = []
 symbolsList.extend(env.Glob(os.path.join(sourceLibDir.path, "*.pdb")))
 symbolsList.extend(env.Glob(os.path.join(sourceLibDir64.path, "*.pdb")))
-symbolsArchive = env.ZipArchive(outputDir.File("%s_debugSymbols.zip" % outFilePrefix), symbolsList)
+symbolsArchive = env.ZipArchive(outputDir.File("%s_debugSymbols.zip" % outFilePrefix), symbolsList)  # noqa: UP031
 env.Alias("symbolsArchive", symbolsArchive)
 
 appx_storeSubmission = env.SConscript(
@@ -693,12 +705,63 @@ env.Alias("appx", [installed_appx_storeSubmission, installed_appx_sideLoadable])
 
 env.Default(dist)
 
-env.SConscript("tests/sconscript", exports=["env", "sourceDir", "pot"])
-
 
 # Generate a list of Python modules from compiled '.pyc' files in library.zip
 env.Tool("listModules")
 source = env.Dir(os.path.join(os.getcwd(), "dist"))
-# Putting the target in the output dir automatically causes AppVeyor to package it as an artefact
 target = env.File(os.path.join(outputDir.abspath, "library_modules.txt"))
 env.Alias("moduleList", env.GenerateModuleList(target, source))
+
+synthDriverHost32Runtime = env.Command(
+	target="#runtime-builders/synthDriverHost32/dist",
+	source="#runtime-builders/synthDriverHost32/setup-runtime.py",
+	chdir=Dir("#runtime-builders/synthDriverHost32"),
+	action=[
+		[
+			"uv",
+			"run",
+			"-v",
+			"--no-active",
+			"--directory",
+			".",
+			"python",
+			"setup-runtime.py",
+			"--dest-dir",
+			"dist",
+			"--version",
+			version,
+			"--publisher",
+			publisher,
+		],
+		r"rmdir /s /q ..\..\source\lib\x86\synthDriverHost-runtime || exit 0",
+		r"xcopy /e /i /y dist ..\..\source\lib\x86\synthDriverHost-runtime",
+	],
+	ENV=os.environ,
+)
+env.AlwaysBuild(synthDriverHost32Runtime)
+env.Alias("synthDriverHost32Runtime", synthDriverHost32Runtime)
+
+# Copy sapi5 and sonic Python files to the _synthDrivers32 directory
+# As they require no changes, but need to be in an isolated directory for 32 bit.
+env.Command(
+	sourceDir.File("_synthDrivers32/_sonic.py"),
+	sourceDir.File("synthDrivers/_sonic.py"),
+	Copy("$TARGET", "$SOURCE"),
+)
+env.Command(
+	sourceDir.File("_synthDrivers32/_sapi5.py"),
+	sourceDir.File("synthDrivers/sapi5.py"),
+	Copy("$TARGET", "$SOURCE"),
+)
+
+# Parts of the speech package are quired by the 32 bit synthDriver host tunrime
+env.Command(
+	sourceDir.File("_bridge/runtimes/synthDriverHost/speech/commands.py"),
+	sourceDir.File("speech/commands.py"),
+	Copy("$TARGET", "$SOURCE"),
+)
+env.Command(
+	sourceDir.File("_bridge/runtimes/synthDriverHost/speech/types.py"),
+	sourceDir.File("speech/types.py"),
+	Copy("$TARGET", "$SOURCE"),
+)

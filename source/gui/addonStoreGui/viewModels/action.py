@@ -1,18 +1,20 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2022-2023 NV Access Limited
+# Copyright (C) 2022-2025 NV Access Limited
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-from abc import ABC, abstractmethod
+from abc import ABC, abstractmethod  # noqa: I001
 from typing import (
-	Callable,
 	Generic,
-	Iterable,
 	Optional,
 	TypeVar,
 	TYPE_CHECKING,
 )
+from collections.abc import Callable, Iterable
 
+from addonStore.dataManager import addonDataManager
+from addonStore.models.addon import _AddonGUIModel
+from addonStore.models.channel import UpdateChannel
 import extensionPoints
 from logHandler import log
 
@@ -23,7 +25,7 @@ if TYPE_CHECKING:
 ActionTargetT = TypeVar("ActionTargetT", Optional["AddonListItemVM"], Iterable["AddonListItemVM"])
 
 
-class _AddonAction(Generic[ActionTargetT], ABC):
+class _AddonAction(Generic[ActionTargetT], ABC):  # noqa: PYI059, UP046
 	def __init__(
 		self,
 		displayName: str,
@@ -166,3 +168,20 @@ class BatchAddonActionVM(_AddonAction[Iterable["AddonListItemVM"]]):
 
 		self._actionTarget = newActionTarget
 		self._notify()
+
+
+class AddonUpdateChannelActionVM(AddonActionVM):
+	"""Action for updating the channel of an addon"""
+
+	def __init__(self, actionTarget: "AddonListItemVM[_AddonGUIModel]", channel: UpdateChannel):
+		super().__init__(
+			displayName=channel.displayString,
+			actionHandler=self._updateChannel,
+			# Always valid, as the channel can always be changed from the installed/update tabs.
+			validCheck=lambda aVM: True,
+			actionTarget=actionTarget,
+		)
+		self.channel = channel
+
+	def _updateChannel(self, listItemVM: "AddonListItemVM[_AddonGUIModel]"):
+		addonDataManager.storeSettings.setAddonSettings(listItemVM.model.addonId, updateChannel=self.channel)

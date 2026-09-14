@@ -3,7 +3,8 @@
 # See the file COPYING for more details.
 # Copyright (C) 2020-2021 NV Access limited, Leonard de Ruijter
 
-import UIAHandler
+
+import UIAHandler  # noqa: I001
 from . import web
 import controlTypes
 
@@ -50,7 +51,7 @@ class ChromiumUIATextInfo(web.UIAWebTextInfo):
 		if obj.role == controlTypes.Role.COMBOBOX:
 			field["content"] = obj.value
 		# Layout tables do not have the UIA table pattern
-		if field["role"] == controlTypes.Role.TABLE:
+		if field["role"] == controlTypes.Role.TABLE:  # noqa: SIM102
 			if not obj._getUIACacheablePropertyValue(UIAHandler.UIA_IsTablePatternAvailablePropertyId):
 				field["table-layout"] = True
 		# Currently no way to tell if author has explicitly set name.
@@ -66,10 +67,19 @@ class ChromiumUIATextInfo(web.UIAWebTextInfo):
 class ChromiumUIA(web.UIAWeb):
 	_TextInfo = ChromiumUIATextInfo
 
+	def _get_states(self) -> set[controlTypes.State]:
+		states = super().states
+		if self.role == controlTypes.Role.LINK and self.linkType:
+			states.add(self.linkType)
+		return states
+
 
 class ChromiumUIATreeInterceptor(web.UIAWebTreeInterceptor):
 	def _get_documentConstantIdentifier(self):
 		return self.rootNVDAObject.parent._getUIACacheablePropertyValue(UIAHandler.UIA_AutomationIdPropertyId)
+
+	def _get_documentURL(self) -> str | None:
+		return self.rootNVDAObject.value
 
 
 class ChromiumUIADocument(ChromiumUIA):

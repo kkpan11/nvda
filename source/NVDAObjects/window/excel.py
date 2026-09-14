@@ -1,17 +1,20 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2023 NV Access Limited, Dinesh Kaushal, Siddhartha Gupta, Accessolutions, Julien Cochuyt,
+# Copyright (C) 2006-2026 NV Access Limited, Dinesh Kaushal, Siddhartha Gupta, Accessolutions, Julien Cochuyt,
 # Cyrille Bougot, Leonard de Ruijter
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
+from __future__ import annotations  # noqa: I001
 import abc
 import ctypes
 import enum
-from typing import (
-	Any,
-	Dict,
-	Optional,
-)
+from winBindings import user32
+import winBindings.gdi32
+from locationHelper import RectLTWH
+
+from typing import Any
+from collections.abc import Callable
+import warnings
 
 from comtypes import COMError, BSTR
 import comtypes.automation
@@ -29,6 +32,7 @@ from tableUtils import HeaderCellTracker
 import config
 from config.configFlags import ReportCellBorders
 import textInfos
+from utils.urlUtils import _LinkData
 import colors
 import eventHandler
 import api
@@ -42,6 +46,7 @@ import mouseHandler
 from displayModel import DisplayModelTextInfo
 import controlTypes
 from controlTypes import TextPosition, TextAlign, VerticalTextAlign
+from NVDAHelper.localLib import EXCEL_CELLINFO
 from . import Window
 from .. import NVDAObjectTextInfo
 import scriptHandler
@@ -51,6 +56,11 @@ import vision
 from utils.displayString import DisplayStringIntEnum
 import NVDAState
 from globalCommands import SCRCAT_SYSTEMCARET
+from ._msOffice import MsoHyperlink
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+	from ._msOfficeChart import OfficeChart
 
 excel2010VersionMajor = 14
 
@@ -129,15 +139,23 @@ def __getattr__(attrName: str) -> Any:
 			1: "default",
 		},
 	}
-	if attrName in _deprecatedConstantsMap and NVDAState._allowDeprecatedAPI():
-		replacementSymbol = _deprecatedConstantsMap[attrName]
-		log.warning(
-			f"Importing {attrName} from here is deprecated. "
-			f"Import XlVAlign or XlHAlign enumerations instead.",
-			stack_info=True,
-		)
-		return replacementSymbol
-	raise AttributeError(f"module {repr(__name__)} has no attribute {repr(attrName)}")
+	if NVDAState._allowDeprecatedAPI():
+		if attrName in _deprecatedConstantsMap:
+			replacementSymbol = _deprecatedConstantsMap[attrName]
+			log.warning(
+				f"Importing {attrName} from here is deprecated. "
+				f"Import XlVAlign or XlHAlign enumerations instead.",
+				stack_info=True,
+			)
+			return replacementSymbol
+		elif attrName == "ExcelCellInfo":
+			warnings.warn(
+				"NVDAObjects.window.excel.ExcelCellInfo is deprecated. Use NVDAHelper.localLib.EXCEL_CELLINFO instead.",
+				DeprecationWarning,
+				stacklevel=2,
+			)
+			return EXCEL_CELLINFO
+	raise AttributeError(f"module {__name__!r} has no attribute {attrName!r}")
 
 
 xlDown = -4121
@@ -146,6 +164,16 @@ xlToRight = -4161
 xlUp = -4162
 xlCellWidthUnitToPixels = 7.5919335705812574139976275207592
 xlSheetVisible = -1
+
+
+class XlApplicationInternational(enum.IntEnum):
+	"""Specifies country/region and international settings.
+
+	.. seealso:: ```XlApplicationInternational`` enumeration (Excel) <https://learn.microsoft.com/en-us/office/vba/api/excel.xlapplicationinternational>`_
+	"""
+
+	LIST_SEPARATOR = 5
+
 
 xlA1 = 1
 xlRC = 2
@@ -284,17 +312,27 @@ backgroundPatternLabels = {
 	xlPatternRectangularGradient: _("rectangular gradient"),
 }
 
-from .excelCellBorder import getCellBorderStyleDescription  # noqa: E402
+from .excelCellBorder import getCellBorderStyleDescription
 
 re_RC = re.compile(r"R(?:\[(\d+)\])?C(?:\[(\d+)\])?")
 re_absRC = re.compile(r"^R(\d+)C(\d+)(?::R(\d+)C(\d+))?$")
+
+
+def getPixelPerInch() -> tuple[int, int]:
+	hDC = user32.GetDC(None)
+	# pixels per inch along screen width
+	px = winBindings.gdi32.GetDeviceCaps(hDC, LOGPIXELSX)
+	# pixels per inch along screen height
+	py = winBindings.gdi32.GetDeviceCaps(hDC, LOGPIXELSY)
+	user32.ReleaseDC(None, hDC)
+	return px, py
 
 
 class ExcelQuickNavItem(browseMode.QuickNavItem):
 	def __init__(self, nodeType, document, itemObject, itemCollection):
 		self.excelItemObject = itemObject
 		self.excelItemCollection = itemCollection
-		super(ExcelQuickNavItem, self).__init__(nodeType, document)
+		super().__init__(nodeType, document)
 
 	def activate(self):
 		pass
@@ -316,7 +354,7 @@ class ExcelChartQuickNavItem(ExcelQuickNavItem):
 		else:
 			nameText = chartObject.Name
 		self.label = f"{nameText} {topLeftAddress}-{bottomRightAddress}"
-		super(ExcelChartQuickNavItem, self).__init__(
+		super().__init__(
 			nodeType,
 			document,
 			chartObject,
@@ -371,12 +409,7 @@ class ExcelRangeBasedQuickNavItem(ExcelQuickNavItem):
 	def isAfterSelection(self):
 		activeCell = self.document.Application.ActiveCell
 		log.debugWarning(
-			"active row: {} active column: {} current row: {} current column: {}".format(
-				activeCell.row,
-				activeCell.column,
-				self.excelItemObject.row,
-				self.excelItemObject.column,
-			),
+			f"active row: {activeCell.row} active column: {activeCell.column} current row: {self.excelItemObject.row} current column: {self.excelItemObject.column}",
 		)
 
 		if self.excelItemObject.row == activeCell.row:
@@ -395,16 +428,16 @@ class ExcelCommentQuickNavItem(ExcelRangeBasedQuickNavItem):
 			+ " "
 			+ (self.comment.Text() if self.comment else "")
 		)
-		super(ExcelCommentQuickNavItem, self).__init__(nodeType, document, commentObject, commentCollection)
+		super().__init__(nodeType, document, commentObject, commentCollection)
 
 
 class ExcelFormulaQuickNavItem(ExcelRangeBasedQuickNavItem):
 	def __init__(self, nodeType, document, formulaObject, formulaCollection):
 		self.label = formulaObject.address(False, False, 1, False) + " " + formulaObject.FormulaLocal
-		super(ExcelFormulaQuickNavItem, self).__init__(nodeType, document, formulaObject, formulaCollection)
+		super().__init__(nodeType, document, formulaObject, formulaCollection)
 
 
-class ExcelQuicknavIterator(object):
+class ExcelQuicknavIterator:
 	"""
 	Allows iterating over an MS excel collection
 	(e.g. notes, Formulas or charts) emitting L{QuickNavItem} objects.
@@ -496,7 +529,7 @@ class ExcelSheetQuickNavItem(ExcelQuickNavItem):
 		self.label = sheetObject.Name
 		self.sheetIndex = sheetObject.Index
 		self.sheetObject = sheetObject
-		super(ExcelSheetQuickNavItem, self).__init__(nodeType, document, sheetObject, sheetCollection)
+		super().__init__(nodeType, document, sheetObject, sheetCollection)
 
 	def __lt__(self, other):
 		return self.sheetIndex < other.sheetIndex
@@ -517,7 +550,7 @@ class ExcelSheetQuickNavItem(ExcelQuickNavItem):
 	@property
 	def isAfterSelection(self):
 		activeSheet = self.document.Application.ActiveSheet
-		if self.sheetObject.Index <= activeSheet.Index:
+		if self.sheetObject.Index <= activeSheet.Index:  # noqa: SIM103
 			return False
 		else:
 			return True
@@ -548,7 +581,7 @@ class ExcelBrowseModeTreeInterceptor(browseMode.BrowseModeTreeInterceptor):
 	disableAutoPassThrough = True
 
 	def __init__(self, rootNVDAObject):
-		super(ExcelBrowseModeTreeInterceptor, self).__init__(rootNVDAObject)
+		super().__init__(rootNVDAObject)
 		# Note, as _set_passThrough has logic to handle braille and vision updates which are unnecessary when
 		# initializing this tree interceptor, we set the private _passThrough variable here, which is enough.
 		self._passThrough = True
@@ -663,7 +696,7 @@ class ExcelBrowseModeTreeInterceptor(browseMode.BrowseModeTreeInterceptor):
 		return self.rootNVDAObject._getSelection()
 
 	def _set_selection(self, info):
-		super(ExcelBrowseModeTreeInterceptor, self)._set_selection(info)
+		super()._set_selection(info)
 		# review.handleCaretMove(info)
 
 	def _get_ElementsListDialog(self):
@@ -710,7 +743,7 @@ class ExcelBrowseModeTreeInterceptor(browseMode.BrowseModeTreeInterceptor):
 			raise NotImplementedError
 
 	def script_elementsList(self, gesture):
-		super(ExcelBrowseModeTreeInterceptor, self).script_elementsList(gesture)
+		super().script_elementsList(gesture)
 
 	# Translators: the description for the elements list command in Microsoft Excel.
 	script_elementsList.__doc__ = _("Lists various types of elements in this spreadsheet")
@@ -757,7 +790,7 @@ class ExcelBase(Window):
 				winUser.OBJID_NATIVEOM,
 				interface=comtypes.automation.IDispatch,
 			)
-		except (COMError, WindowsError):
+		except (OSError, COMError):
 			return None
 		return comtypes.client.dynamic.Dispatch(pDispatch)
 
@@ -793,6 +826,15 @@ class ExcelBase(Window):
 			obj.parent = selection
 		return obj
 
+	def _getActiveCell(self) -> ExcelCell:
+		cell = self.excelWindowObject.ActiveCell
+		obj = ExcelCell(
+			windowHandle=self.windowHandle,
+			excelWindowObject=self.excelWindowObject,
+			excelCellObject=cell,
+		)
+		return obj
+
 	def _getSelection(self):
 		selection = self.excelWindowObject.Selection
 		try:
@@ -804,7 +846,7 @@ class ExcelBase(Window):
 		except (COMError, NameError):
 			numCells = 0
 
-		isChartActive = True if self.excelWindowObject.ActiveChart else False
+		isChartActive = True if self.excelWindowObject.ActiveChart else False  # noqa: SIM210
 		obj = None
 		if not isMerged and numCells > 1:
 			obj = ExcelSelection(
@@ -849,7 +891,7 @@ class Excel7Window(ExcelBase):
 		return self.excelWindowObjectFromWindow(self.windowHandle)
 
 	def _get_focusRedirect(self):
-		selection = self._getSelection()
+		selection = self._getActiveCell()
 		dropdown = self._getDropdown(selection=selection)
 		if dropdown:
 			return dropdown
@@ -981,7 +1023,7 @@ class ExcelWorksheet(ExcelBase):
 			raise ValueError("One or both of isColumnHeader or isRowHeader must be True")
 		name += uuid.uuid4().hex
 		relativeName = name
-		name = "%s!%s" % (cell.excelRangeObject.worksheet.name, name)
+		name = "%s!%s" % (cell.excelRangeObject.worksheet.name, name)  # noqa: UP031
 		if oldInfo:
 			self.excelWorksheetObject.parent.names(oldInfo.name).delete()
 			oldInfo.name = name
@@ -1060,13 +1102,13 @@ class ExcelWorksheet(ExcelBase):
 	def __init__(self, windowHandle=None, excelWindowObject=None, excelWorksheetObject=None):
 		self.excelWindowObject = excelWindowObject
 		self.excelWorksheetObject = excelWorksheetObject
-		super(ExcelWorksheet, self).__init__(windowHandle=windowHandle)
+		super().__init__(windowHandle=windowHandle)
 
 	def _get_name(self):
 		return self.excelWorksheetObject.name
 
 	def _isEqual(self, other):
-		if not super(ExcelWorksheet, self)._isEqual(other):
+		if not super()._isEqual(other):
 			return False
 		return self.excelWorksheetObject.index == other.excelWorksheetObject.index
 
@@ -1079,7 +1121,7 @@ class ExcelWorksheet(ExcelBase):
 		)
 
 	def _get_states(self):
-		states = super(ExcelWorksheet, self).states
+		states = super().states
 		if self.excelWorksheetObject.ProtectContents:
 			states.add(controlTypes.State.PROTECTED)
 		return states
@@ -1092,6 +1134,22 @@ class ExcelWorksheet(ExcelBase):
 			"kb:numpadEnter",
 			"kb:shift+enter",
 			"kb:shift+numpadEnter",
+		),
+		canPropagate=True,
+	)
+	def script_changeActiveCell(self, gesture: inputCore.InputGesture) -> None:
+		isChartActive = True if self.excelWindowObject.ActiveChart else False  # noqa: SIM210
+		if isChartActive:
+			objGetter = self._getSelection
+		else:
+			objGetter = self._getActiveCell
+		self.changeSelectionOrActiveCell(
+			gesture=gesture,
+			objGetter=objGetter,
+		)
+
+	@scriptHandler.script(
+		gestures=(
 			"kb:upArrow",
 			"kb:downArrow",
 			"kb:leftArrow",
@@ -1138,8 +1196,18 @@ class ExcelWorksheet(ExcelBase):
 		),
 		canPropagate=True,
 	)
-	def script_changeSelection(self, gesture):
-		oldSelection = self._getSelection()
+	def script_changeSelection(self, gesture: inputCore.InputGesture) -> None:
+		self.changeSelectionOrActiveCell(
+			gesture=gesture,
+			objGetter=self._getSelection,
+		)
+
+	def changeSelectionOrActiveCell(
+		self,
+		gesture: inputCore.InputGesture,
+		objGetter: Callable[[], ExcelCell | ExcelSelection | OfficeChart],
+	):
+		oldSelection = objGetter()
 		gesture.send()
 		newSelection = None
 		start = time.time()
@@ -1155,7 +1223,7 @@ class ExcelWorksheet(ExcelBase):
 			if eventHandler.isPendingEvents("gainFocus"):
 				# This object is no longer focused.
 				return
-			newSelection = self._getSelection()
+			newSelection = objGetter()
 			if newSelection and newSelection != oldSelection:
 				log.debug(f"Detected new selection after {elapsed} sec")
 				break
@@ -1303,7 +1371,7 @@ class ExcelCellTextInfo(NVDAObjectTextInfo):
 			formatField["italic"] = fontObj.italic
 			underline = fontObj.underline
 			formatField["underline"] = (
-				False if underline is None or underline == xlUnderlineStyleNone else True
+				False if underline is None or underline == xlUnderlineStyleNone else True  # noqa: SIM211
 			)
 			formatField["strikethrough"] = fontObj.strikethrough
 		if formatConfig["reportSuperscriptsAndSubscripts"]:
@@ -1393,42 +1461,25 @@ class NvCellState(enum.IntEnum):
 	UNLOCKED = (1 << 10,)
 
 
-_nvCellStatesToStates: Dict[NvCellState, controlTypes.State] = {
+_nvCellStatesToStates: dict[NvCellState, controlTypes.State] = {
 	NvCellState.EXPANDED: controlTypes.State.EXPANDED,
 	NvCellState.COLLAPSED: controlTypes.State.COLLAPSED,
 	NvCellState.LINKED: controlTypes.State.LINKED,
 	NvCellState.HASPOPUP: controlTypes.State.HASPOPUP,
 	NvCellState.PROTECTED: controlTypes.State.PROTECTED,
 	NvCellState.HASFORMULA: controlTypes.State.HASFORMULA,
-	NvCellState.HASCOMMENT: controlTypes.State.HASCOMMENT,
+	NvCellState.HASCOMMENT: controlTypes.State.HASNOTE,
 	NvCellState.CROPPED: controlTypes.State.CROPPED,
 	NvCellState.OVERFLOWING: controlTypes.State.OVERFLOWING,
 	NvCellState.UNLOCKED: controlTypes.State.UNLOCKED,
 }
 
 
-class ExcelCellInfo(ctypes.Structure):
-	_fields_ = [
-		("text", comtypes.BSTR),
-		("address", comtypes.BSTR),
-		("inputTitle", comtypes.BSTR),
-		("inputMessage", comtypes.BSTR),
-		("nvCellStates", ctypes.c_longlong),  # bitwise OR of the NvCellState enum values.
-		("rowNumber", ctypes.c_long),
-		("rowSpan", ctypes.c_long),
-		("columnNumber", ctypes.c_long),
-		("columnSpan", ctypes.c_long),
-		("outlineLevel", ctypes.c_long),
-		("comments", comtypes.BSTR),
-		("formula", comtypes.BSTR),
-	]
-
-
 class ExcelCellInfoQuickNavItem(browseMode.QuickNavItem):
 	def __init__(self, parentIterator, cellInfo):
 		self.excelCellInfo = cellInfo
 		self.parentIterator = parentIterator
-		super(ExcelCellInfoQuickNavItem, self).__init__(parentIterator.itemType, parentIterator.document)
+		super().__init__(parentIterator.itemType, parentIterator.document)
 
 	def activate(self):
 		pass
@@ -1463,28 +1514,37 @@ class ExcelCellInfoQuickNavItem(browseMode.QuickNavItem):
 
 	@property
 	def label(self):
-		return "%s: %s" % (self.excelCellInfo.address.split("!")[-1], self.excelCellInfo.text)
+		return "%s: %s" % (self.excelCellInfo.address.split("!")[-1], self.excelCellInfo.text)  # noqa: UP031
 
 
 class CommentExcelCellInfoQuickNavItem(ExcelCellInfoQuickNavItem):
 	@property
 	def label(self):
-		return "%s: %s" % (self.excelCellInfo.address.split("!")[-1], self.excelCellInfo.comments)
+		return "%s: %s" % (self.excelCellInfo.address.split("!")[-1], self.excelCellInfo.comments)  # noqa: UP031
+
+
+def convertAddressToLocal(application: comtypes.client.lazybind.Dispatch, address: str) -> str:
+	"""Converts a range address string from invariant to local representation.
+	E.g. "'[Filename.xlsx]Sheet1'!$A$2,$A$4" becomes "'[Filename.xlsx]Sheet1'!$A$2;$A$4" on a French system.
+	"""
+
+	fileAndSheet, range = address.rsplit("!", 1)
+	sep = application.International(XlApplicationInternational.LIST_SEPARATOR)
+	return f"{fileAndSheet}!{range.replace(',', sep)}"
 
 
 class FormulaExcelCellInfoQuickNavItem(ExcelCellInfoQuickNavItem):
 	@property
 	def label(self):
-		return "%s: %s" % (self.excelCellInfo.address.split("!")[-1], self.excelCellInfo.formula)
+		return "%s: %s" % (self.excelCellInfo.address.split("!")[-1], self.excelCellInfo.formula)  # noqa: UP031
 
 
-class ExcelCellInfoQuicknavIterator(object, metaclass=abc.ABCMeta):
+class ExcelCellInfoQuicknavIterator(metaclass=abc.ABCMeta):
 	cellInfoFlags = NVCELLINFOFLAG_ADDRESS | NVCELLINFOFLAG_COORDS
 
 	@abc.abstractproperty
 	def QuickNavItemClass(self):
 		"""The particular L{ExcelCellInfoQuicknavItem} subclass for objects that  should be emitted from the L{iterate} method."""
-		pass
 
 	def __init__(self, itemType, document, direction, includeCurrent):
 		"""
@@ -1496,12 +1556,11 @@ class ExcelCellInfoQuicknavIterator(object, metaclass=abc.ABCMeta):
 		self.itemType = itemType
 		self.direction = direction if direction else "next"
 		self.includeCurrent = includeCurrent
-		self.selectedCellInfo = self.document._getSelection().excelCellInfo
+		self.selectedCellInfo = self.document._getActiveCell().excelCellInfo
 
 	@abc.abstractmethod
 	def collectionFromWorksheet(self, worksheetObject):
 		"""An Excel range object covering all the cells that should be emitted by the L{iterate} method."""
-		pass
 
 	def iterate(self):
 		worksheet = self.document.excelWorksheetObject
@@ -1512,13 +1571,13 @@ class ExcelCellInfoQuicknavIterator(object, metaclass=abc.ABCMeta):
 		if not collectionObject:
 			return
 		count = collectionObject.count
-		cellInfos = (ExcelCellInfo * count)()
+		cellInfos = (EXCEL_CELLINFO * count)()
 		numCellsFetched = ctypes.c_long()
 		address = collectionObject.address(True, True, xlA1, True)
 		NVDAHelper.localLib.nvdaInProcUtils_excel_getCellInfos(
 			self.document.appModule.helperLocalBindingHandle,
 			self.document.windowHandle,
-			BSTR(address),
+			BSTR(convertAddressToLocal(worksheet.Application, address)),
 			self.cellInfoFlags,
 			count,
 			cellInfos,
@@ -1527,7 +1586,7 @@ class ExcelCellInfoQuicknavIterator(object, metaclass=abc.ABCMeta):
 		for index in range(numCellsFetched.value):
 			ci = cellInfos[index]
 			if not ci.address:
-				log.debugWarning("cellInfo at index %s has no address" % index)
+				log.debugWarning("cellInfo at index %s has no address" % index)  # noqa: UP031
 				break
 			yield self.QuickNavItemClass(self, ci)
 
@@ -1549,19 +1608,19 @@ class FormulaExcelCellInfoQuicknavIterator(ExcelCellInfoQuicknavIterator):
 
 
 class ExcelCell(ExcelBase):
-	excelCellInfo: Optional[ExcelCellInfo]
+	excelCellInfo: EXCEL_CELLINFO | None
 	"""Type info for auto property: _get_excelCellInfo"""
 
-	def _get_excelCellInfo(self) -> Optional[ExcelCellInfo]:
+	def _get_excelCellInfo(self) -> EXCEL_CELLINFO | None:
 		if not self.appModule.helperLocalBindingHandle:
 			return None
-		ci = ExcelCellInfo()
+		ci = EXCEL_CELLINFO()
 		numCellsFetched = ctypes.c_long()
 		address = self.excelCellObject.address(True, True, xlA1, True)
 		res = NVDAHelper.localLib.nvdaInProcUtils_excel_getCellInfos(
 			self.appModule.helperLocalBindingHandle,
 			self.windowHandle,
-			BSTR(address),
+			BSTR(convertAddressToLocal(self.excelCellObject.Application, address)),
 			NVCELLINFOFLAG_ALL,
 			1,
 			ctypes.byref(ci),
@@ -1684,7 +1743,7 @@ class ExcelCell(ExcelBase):
 	def __init__(self, windowHandle=None, excelWindowObject=None, excelCellObject=None):
 		self.excelWindowObject = excelWindowObject
 		self.excelCellObject = excelCellObject
-		super(ExcelCell, self).__init__(windowHandle=windowHandle)
+		super().__init__(windowHandle=windowHandle)
 
 	def _get_excelRangeObject(self):
 		return self.excelCellObject
@@ -1694,10 +1753,25 @@ class ExcelCell(ExcelBase):
 			return controlTypes.Role.LINK
 		return controlTypes.Role.TABLECELL
 
+	def _get_linkData(self) -> _LinkData | None:
+		links = self.excelCellObject.Hyperlinks
+		if links.count == 0:
+			return None
+		link = links(1)
+		if link.Type == MsoHyperlink.RANGE:
+			text = link.TextToDisplay
+		else:
+			log.debugWarning(f"No text to display for link type {link.Type}")
+			text = None
+		return _LinkData(
+			displayText=text,
+			destination=link.Address,
+		)
+
 	TextInfo = ExcelCellTextInfo
 
 	def _isEqual(self, other):
-		if not super(ExcelCell, self)._isEqual(other):
+		if not super()._isEqual(other):
 			return False
 		# call range.address directly here as object equality checks may be done quite frequently and otherwise would not require all of cellInfo
 		addressArgs = (
@@ -1764,7 +1838,7 @@ class ExcelCell(ExcelBase):
 		return self.excelCellInfo.text
 
 	def _get_states(self):
-		states = super(ExcelCell, self).states
+		states = super().states
 		cellInfo = self.excelCellInfo
 		if not cellInfo:
 			return states
@@ -1787,9 +1861,9 @@ class ExcelCell(ExcelBase):
 			and controlTypes.State.UNLOCKED not in self.states
 			and controlTypes.State.PROTECTED in self.parent.states
 		):
-			winsound.PlaySound("Default", winsound.SND_ALIAS | winsound.SND_NOWAIT | winsound.SND_ASYNC)
+			winsound.MessageBeep()
 			return
-		super(ExcelCell, self).event_typedCharacter(ch)
+		super().event_typedCharacter(ch)
 
 	def _get_parent(self):
 		worksheet = self.excelCellObject.Worksheet
@@ -1847,14 +1921,13 @@ class ExcelCell(ExcelBase):
 	@script(
 		description=_(
 			# Translators: the description for a script for Excel
-			"Reports the note on the current cell. "
-			"If pressed twice, presents the information in browse mode",
+			"Reports the note on the current cell. If pressed twice, presents the information in browse mode",
 		),
 		gesture="kb:NVDA+alt+c",
 		category=SCRCAT_SYSTEMCARET,
 		speakOnDemand=True,
 	)
-	def script_reportComment(self, gesture: "inputCore.InputGesture") -> None:
+	def script_reportComment(self, gesture: inputCore.InputGesture) -> None:
 		commentObj = self.excelCellObject.comment
 		text = commentObj.text() if commentObj else None
 		if text:
@@ -1916,7 +1989,27 @@ class ExcelCell(ExcelBase):
 				formatConfig=formatConfig,
 			)
 			speech.speak(sequence)
-		super(ExcelCell, self).reportFocus()
+		super().reportFocus()
+
+	def _get_location(self) -> RectLTWH:
+		cellObj = self.excelCellObject
+		if cellObj.mergeCells:
+			cellObj = cellObj.mergeArea
+		appObj = self.parent.excelApplicationObject
+		zoomRatio = appObj.ActiveWindow.Zoom / 100
+		pointsPerInch = appObj.InchesToPoints(1)
+		ppiX, ppiY = getPixelPerInch()
+		pX = ppiX / pointsPerInch
+		pY = ppiY / pointsPerInch
+		# Coordinates of the grid with respect to the sheet
+		gridX = self.parent.excelApplicationObject.ActiveWindow.PointsToScreenPixelsX(0)
+		gridY = self.parent.excelApplicationObject.ActiveWindow.PointsToScreenPixelsY(0)
+		return RectLTWH.fromFloatCollection(
+			cellObj.left * pX * zoomRatio + gridX,
+			cellObj.top * pY * zoomRatio + gridY,
+			cellObj.width * pX * zoomRatio,
+			cellObj.height * pY * zoomRatio,
+		)
 
 
 class ExcelSelection(ExcelBase):
@@ -1925,10 +2018,10 @@ class ExcelSelection(ExcelBase):
 	def __init__(self, windowHandle=None, excelWindowObject=None, excelRangeObject=None):
 		self.excelWindowObject = excelWindowObject
 		self.excelRangeObject = excelRangeObject
-		super(ExcelSelection, self).__init__(windowHandle=windowHandle)
+		super().__init__(windowHandle=windowHandle)
 
 	def _get_states(self):
-		states = super(ExcelSelection, self).states
+		states = super().states
 		states.add(controlTypes.State.SELECTED)
 		return states
 
@@ -1969,13 +2062,13 @@ class ExcelSelection(ExcelBase):
 	def makeTextInfo(self, position):
 		if position == textInfos.POSITION_SELECTION:
 			position = textInfos.POSITION_ALL
-		return super(ExcelSelection, self).makeTextInfo(position)
+		return super().makeTextInfo(position)
 
 
 class ExcelDropdownItem(Window):
 	firstChild = None
 	lastChild = None
-	children = []
+	children = []  # noqa: RUF012
 	role = controlTypes.Role.LISTITEM
 
 	def __init__(self, parent=None, name=None, states=None, index=None):
@@ -1983,7 +2076,7 @@ class ExcelDropdownItem(Window):
 		self.states = states
 		self.parent = parent
 		self.index = index
-		super(ExcelDropdownItem, self).__init__(windowHandle=parent.windowHandle)
+		super().__init__(windowHandle=parent.windowHandle)
 
 	def _get_previous(self):
 		newIndex = self.index - 1
@@ -2022,7 +2115,7 @@ class ExcelDropdown(Window):
 		states = set()
 		for item in DisplayModelTextInfo(self, textInfos.POSITION_ALL).getTextWithFields():
 			if isinstance(item, textInfos.FieldCommand) and item.command == "formatChange":
-				states = set([controlTypes.State.SELECTABLE])
+				states = set([controlTypes.State.SELECTABLE])  # noqa: C405
 				foreground = item.field.get("color", None)
 				background = item.field.get("background-color", None)
 				if (background, foreground) == self._highlightColors:
@@ -2071,7 +2164,7 @@ class ExcelDropdown(Window):
 			eventHandler.queueEvent("focusEntered", self)
 			eventHandler.queueEvent("gainFocus", child)
 		else:
-			super(ExcelDropdown, self).event_gainFocus()
+			super().event_gainFocus()
 
 
 class ExcelMergedCell(ExcelCell):
@@ -2087,7 +2180,7 @@ class ExcelMergedCell(ExcelCell):
 
 class ExcelFormControl(ExcelBase):
 	isFocusable = True
-	_roleMap = {
+	_roleMap = {  # noqa: RUF012
 		xlButtonControl: controlTypes.Role.BUTTON,
 		xlCheckBox: controlTypes.Role.CHECKBOX,
 		xlDropDown: controlTypes.Role.COMBOBOX,
@@ -2109,7 +2202,7 @@ class ExcelFormControl(ExcelBase):
 	def __init__(self, windowHandle=None, parent=None, excelFormControlObject=None):
 		self.parent = parent
 		self.excelFormControlObject = excelFormControlObject
-		super(ExcelFormControl, self).__init__(windowHandle=windowHandle)
+		super().__init__(windowHandle=windowHandle)
 
 	def _get_role(self):
 		try:
@@ -2122,7 +2215,7 @@ class ExcelFormControl(ExcelBase):
 		return self._roleMap[formControlType]
 
 	def _get_states(self):
-		states = super(ExcelFormControl, self).states
+		states = super().states
 		if self is api.getFocusObject():
 			states.add(controlTypes.State.FOCUSED)
 		newState = None
@@ -2175,13 +2268,8 @@ class ExcelFormControl(ExcelBase):
 		bottomRightCellWidth = bottomRightAddress.Width
 		# bottom right cell's height in points
 		bottomRightCellHeight = bottomRightAddress.Height
+		px, py = getPixelPerInch()
 		self.excelApplicationObject = self.parent.excelWorksheetObject.Application
-		hDC = ctypes.windll.user32.GetDC(None)
-		# pixels per inch along screen width
-		px = ctypes.windll.gdi32.GetDeviceCaps(hDC, LOGPIXELSX)
-		# pixels per inch along screen height
-		py = ctypes.windll.gdi32.GetDeviceCaps(hDC, LOGPIXELSY)
-		ctypes.windll.user32.ReleaseDC(None, hDC)
 		zoom = self.excelApplicationObject.ActiveWindow.Zoom
 		zoomRatio = zoom / 100
 		# Conversion from inches to Points, 1 inch=72points
@@ -2229,7 +2317,7 @@ class ExcelFormControl(ExcelBase):
 
 class ExcelFormControlQuickNavItem(ExcelQuickNavItem):
 	def __init__(self, nodeType, document, formControlObject, formControlCollection, treeInterceptorObj):
-		super(ExcelFormControlQuickNavItem, self).__init__(
+		super().__init__(
 			nodeType,
 			document,
 			formControlObject,
@@ -2303,7 +2391,7 @@ class ExcelFormControlQuickNavItem(ExcelQuickNavItem):
 		return self.formControlObjectIndex < other.formControlObjectIndex
 
 	def moveTo(self):
-		self.excelItemObject.TopLeftCell.Select
+		self.excelItemObject.TopLeftCell.Select  # noqa: B018
 		self.excelItemObject.TopLeftCell.Activate()
 		if self.treeInterceptorObj.passThrough:
 			self.treeInterceptorObj.passThrough = False
@@ -2325,7 +2413,7 @@ class ExcelFormControlQuicknavIterator(ExcelQuicknavIterator):
 	quickNavItemClass = ExcelFormControlQuickNavItem
 
 	def __init__(self, itemType, document, direction, includeCurrent, treeInterceptorObj):
-		super(ExcelFormControlQuicknavIterator, self).__init__(itemType, document, direction, includeCurrent)
+		super().__init__(itemType, document, direction, includeCurrent)
 		self.treeInterceptorObj = treeInterceptorObj
 
 	def collectionFromWorksheet(self, worksheetObject):
@@ -2398,7 +2486,7 @@ class ExcelFormControlQuicknavIterator(ExcelQuicknavIterator):
 
 	def filter(self, shape):
 		if shape.Type == msoFormControl:
-			if shape.FormControlType == xlGroupBox or shape.Visible != msoTrue:
+			if shape.FormControlType == xlGroupBox or shape.Visible != msoTrue:  # noqa: SIM103
 				return False
 			else:
 				return True
@@ -2408,7 +2496,7 @@ class ExcelFormControlQuicknavIterator(ExcelQuicknavIterator):
 
 class ExcelFormControlListBox(ExcelFormControl):
 	def __init__(self, windowHandle=None, parent=None, excelFormControlObject=None):
-		super(ExcelFormControlListBox, self).__init__(
+		super().__init__(
 			windowHandle=windowHandle,
 			parent=parent,
 			excelFormControlObject=excelFormControlObject,
@@ -2428,8 +2516,8 @@ class ExcelFormControlListBox(ExcelFormControl):
 
 	def getChildAtIndex(self, index):
 		name = str(self.excelOLEFormatObject.List(index + 1))
-		states = set([controlTypes.State.SELECTABLE])
-		if self.excelOLEFormatObject.Selected[index + 1] == True:  # noqa: E712
+		states = set([controlTypes.State.SELECTABLE])  # noqa: C405
+		if self.excelOLEFormatObject.Selected[index + 1] == True:
 			states.add(controlTypes.State.SELECTED)
 		return ExcelDropdownItem(parent=self, name=name, states=states, index=index)
 
@@ -2451,7 +2539,7 @@ class ExcelFormControlListBox(ExcelFormControl):
 			if not self.isMultiSelectable:
 				try:
 					self.excelOLEFormatObject.Selected[self.selectedItemIndex] = True
-				except:  # noqa: E722
+				except:  # noqa: E722, S110
 					pass
 			child = self.getChildAtIndex(self.selectedItemIndex - 1)
 			if child:
@@ -2464,7 +2552,7 @@ class ExcelFormControlListBox(ExcelFormControl):
 			if not self.isMultiSelectable:
 				try:
 					self.excelOLEFormatObject.Selected[self.selectedItemIndex] = True
-				except:  # noqa: E722
+				except:  # noqa: E722, S110
 					pass
 			child = self.getChildAtIndex(self.selectedItemIndex - 1)
 			if child:
@@ -2483,7 +2571,7 @@ class ExcelFormControlListBox(ExcelFormControl):
 
 class ExcelFormControlDropDown(ExcelFormControl):
 	def __init__(self, windowHandle=None, parent=None, excelFormControlObject=None):
-		super(ExcelFormControlDropDown, self).__init__(
+		super().__init__(
 			windowHandle=windowHandle,
 			parent=parent,
 			excelFormControlObject=excelFormControlObject,
@@ -2518,7 +2606,7 @@ class ExcelFormControlDropDown(ExcelFormControl):
 
 class ExcelFormControlScrollBar(ExcelFormControl):
 	def __init__(self, windowHandle=None, parent=None, excelFormControlObject=None):
-		super(ExcelFormControlScrollBar, self).__init__(
+		super().__init__(
 			windowHandle=windowHandle,
 			parent=parent,
 			excelFormControlObject=excelFormControlObject,

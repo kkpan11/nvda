@@ -6,8 +6,10 @@
 """App module for Windows Calculator (desktop version)"""
 
 import appModuleHandler
+import config
 import NVDAObjects.IAccessible
 import speech
+from config.configFlags import TypingEcho
 
 
 class AppModule(appModuleHandler.AppModule):
@@ -25,7 +27,7 @@ class Display(NVDAObjects.IAccessible.IAccessible):
 	_nextNameIsCalculationResult: bool = False
 	"""Set to `True` by the gestures which cause the calculator expression to be calculated."""
 
-	calcCommandChars = ["!", "=", "@", "#"]
+	calcCommandChars = ["!", "=", "@", "#"]  # noqa: RUF012
 
 	calcCommandGestures = (
 		"kb:backspace",
@@ -50,13 +52,21 @@ class Display(NVDAObjects.IAccessible.IAccessible):
 	)
 
 	def _get_name(self):
-		name = super(Display, self).name
+		name = super().name
 		if not name:
 			name = _("Display")
 		return name
 
-	def event_typedCharacter(self, ch):
-		super(Display, self).event_typedCharacter(ch)
+	def event_typedCharacter(self, ch: str) -> None:
+		originalMode = config.conf["keyboard"]["speakTypedCharacters"]
+		if originalMode == TypingEcho.EDIT_CONTROLS.value:
+			try:
+				config.conf["keyboard"]["speakTypedCharacters"] = TypingEcho.ALWAYS.value
+				super().event_typedCharacter(ch)
+			finally:
+				config.conf["keyboard"]["speakTypedCharacters"] = originalMode
+		else:
+			super().event_typedCharacter(ch)
 		if ch in self.calcCommandChars:
 			self._nextNameIsCalculationResult = True
 

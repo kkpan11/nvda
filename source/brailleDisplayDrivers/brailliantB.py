@@ -1,16 +1,18 @@
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2012-2023 NV Access Limited, Babbage B.V.
+# Copyright (C) 2012-2026 NV Access Limited, Babbage B.V., Leonard de Ruijter
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-import time
-from typing import List, Union
+import time  # noqa: I001
 
 import serial
 import braille
+import braille.display
+import braille.display.driver
+import braille.display.gesture
 import inputCore
 from logHandler import log
-import brailleInput
+import braille.input.gesture
 import bdDetect
 import hwIo
 from hwIo import intToByte, boolToByte
@@ -35,6 +37,7 @@ HR_CAPS = b"\x01"
 HR_KEYS = b"\x04"
 HR_BRAILLE = b"\x05"
 HR_POWEROFF = b"\x07"
+HID_USAGE_PAGE = 0x93
 
 KEY_NAMES = {
 	1: "power",  # Brailliant BI 32, 40 and 80.
@@ -78,8 +81,8 @@ DOT8_KEY = 9
 SPACE_KEY = 10
 
 
-class BrailleDisplayDriver(braille.BrailleDisplayDriver):
-	_dev: Union[hwIo.Serial, hwIo.Hid]
+class BrailleDisplayDriver(braille.display.driver.BrailleDisplayDriver):
+	_dev: hwIo.Serial | hwIo.Hid
 	name = "brailliantB"
 	# Translators: The name of a series of braille displays.
 	description = _("HumanWare Brailliant BI/B series / BrailleNote Touch")
@@ -89,22 +92,28 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 	@classmethod
 	def registerAutomaticDetection(cls, driverRegistrar: bdDetect.DriverRegistrar):
 		driverRegistrar.addUsbDevices(
-			bdDetect.DeviceType.HID,
+			bdDetect.ProtocolType.HID,
 			{
 				"VID_1C71&PID_C111",  # Mantis Q 40
 				"VID_1C71&PID_C101",  # Chameleon 20
+				"VID_1C71&PID_C131",  # Brailliant BI 40X
+				"VID_1C71&PID_C141",  # Brailliant BI 20X
+			},
+			matchFunc=bdDetect.HIDUsagePageMatchFuncFactory(HID_USAGE_PAGE),
+		)
+		driverRegistrar.addUsbDevices(
+			bdDetect.ProtocolType.HID,
+			{
 				"VID_1C71&PID_C121",  # Humanware BrailleOne 20 HID
 				"VID_1C71&PID_CE01",  # NLS eReader 20 HID
 				"VID_1C71&PID_C006",  # Brailliant BI 32, 40 and 80
 				"VID_1C71&PID_C022",  # Brailliant BI 14
-				"VID_1C71&PID_C131",  # Brailliant BI 40X
-				"VID_1C71&PID_C141",  # Brailliant BI 20X
 				"VID_1C71&PID_C00A",  # BrailleNote Touch
 				"VID_1C71&PID_C00E",  # BrailleNote Touch v2
 			},
 		)
 		driverRegistrar.addUsbDevices(
-			bdDetect.DeviceType.SERIAL,
+			bdDetect.ProtocolType.SERIAL,
 			{
 				"VID_1C71&PID_C005",  # Brailliant BI 32, 40 and 80
 				"VID_1C71&PID_C021",  # Brailliant BI 14
@@ -112,38 +121,50 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 		)
 		driverRegistrar.addBluetoothDevices(
 			lambda m: (
-				m.type == bdDetect.DeviceType.SERIAL
-				and (
-					m.id.startswith("Brailliant B") or m.id == "Brailliant 80" or "BrailleNote Touch" in m.id
+				(
+					m.type == bdDetect.ProtocolType.SERIAL
+					and (
+						m.id.startswith("Brailliant B")
+						or m.id == "Brailliant 80"
+						or "BrailleNote Touch" in m.id
+					)
 				)
-			)
-			or (
-				m.type == bdDetect.DeviceType.HID
-				and m.deviceInfo.get("manufacturer") == "Humanware"
-				and m.deviceInfo.get("product")
-				in (
-					"Brailliant HID",
-					"APH Chameleon 20",
-					"APH Mantis Q40",
-					"Humanware BrailleOne",
-					"NLS eReader",
-					"NLS eReader Humanware",
-					"Brailliant BI 40X",
-					"Brailliant BI 20X",
+				or (
+					m.type == bdDetect.ProtocolType.HID
+					and m.deviceInfo.get("manufacturer") == "Humanware"
+					and (
+						(
+							m.deviceInfo.get("product")
+							in (
+								"APH Chameleon 20",
+								"APH Mantis Q40",
+								"Brailliant BI 40X",
+								"Brailliant BI 20X",
+							)
+							and bdDetect._isHIDUsagePageMatch(m, HID_USAGE_PAGE)
+						)
+						or m.deviceInfo.get("product")
+						in (
+							"Brailliant HID",
+							"Humanware BrailleOne",
+							"NLS eReader",
+							"NLS eReader Humanware",
+						)
+					)
 				)
 			),
 		)
 
 	@classmethod
 	def getManualPorts(cls):
-		return braille.getSerialPorts()
+		return braille.display.getSerialPorts()
 
 	def __init__(self, port="auto"):
-		super(BrailleDisplayDriver, self).__init__()
+		super().__init__()
 		self.numCells = 0
 
-		for portType, portId, port, portInfo in self._getTryPorts(port):
-			self.isHid = portType == bdDetect.DeviceType.HID
+		for portType, portId, port, portInfo in self._getTryPorts(port):  # noqa: B020, PLR1704
+			self.isHid = portType == bdDetect.ProtocolType.HID
 			# Try talking to the display.
 			try:
 				if self.isHid:
@@ -157,7 +178,7 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 						writeTimeout=TIMEOUT,
 						onReceive=self._serOnReceive,
 					)
-			except EnvironmentError:
+			except OSError:
 				log.debugWarning("", exc_info=True)
 				continue  # Couldn't connect.
 			# The Brailliant can fail to init if you try immediately after connecting.
@@ -172,11 +193,7 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 			if self.numCells:
 				# A display responded.
 				log.info(
-					"Found display with {cells} cells connected via {type} ({port})".format(
-						cells=self.numCells,
-						type=portType,
-						port=port,
-					),
+					f"Found display with {self.numCells} cells connected via {portType} ({port})",
 				)
 				break
 			# This device can't be initialized. Move on to the next (if any).
@@ -190,11 +207,27 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 
 	def _initAttempt(self):
 		if self.isHid:
+			# Ensure to set self.numCells only at the end of this method to prevent display writes before the capabilities/numCells request
+			numCells = 0
+			# First try to get cell count from _writeSize
+			try:
+				# _writeSize includes 4 bytes of overhead, so subtract 4
+				numCells = self._dev._writeSize - 4
+			except AttributeError:
+				log.debugWarning("Could not get _writeSize from HID device")
+
+			# Adjust numCells based on reported number of cells
 			try:
 				data: bytes = self._dev.getFeature(HR_CAPS)
-			except WindowsError:
+				reportedNumCells = data[24]
+				if reportedNumCells > 0:
+					# Update numCells based on reported cell count from the device
+					numCells = reportedNumCells
+				else:
+					log.debugWarning("Could not get number of cells from HID device using HR_CAPS")
+			except OSError:
 				return  # Fail!
-			self.numCells = data[24]
+			self.numCells = numCells
 		else:
 			# This will cause the display to return the number of cells.
 			# The _serOnReceive callback will see this and set self.numCells.
@@ -203,13 +236,13 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 
 	def terminate(self):
 		try:
-			super(BrailleDisplayDriver, self).terminate()
+			super().terminate()
 		finally:
 			# Make sure the device gets closed.
 			# If it doesn't, we may not be able to re-open it later.
 			self._dev.close()
 
-	def _serSendMessage(self, msgId: bytes, payload: Union[bytes, int, bool] = b""):
+	def _serSendMessage(self, msgId: bytes, payload: bytes | int | bool = b""):
 		if not isinstance(payload, bytes):
 			if isinstance(payload, int):
 				payload: bytes = intToByte(payload)
@@ -229,7 +262,7 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 
 	def _serOnReceive(self, data: bytes):
 		if data != HEADER:
-			log.debugWarning("Ignoring byte before header: %r" % data)
+			log.debugWarning("Ignoring byte before header: %r" % data)  # noqa: UP031
 			return
 		msgId = self._dev.read(1)
 		length = ord(self._dev.read(1))
@@ -240,7 +273,7 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 		if msgId == MSG_INIT_RESP:
 			if payload[0] != 0:
 				# Communication not allowed.
-				log.debugWarning("Display at %r reports communication not allowed" % self._dev.port)
+				log.debugWarning("Display at %r reports communication not allowed" % self._dev.port)  # noqa: UP031
 				return
 			self.numCells = payload[2]
 
@@ -257,7 +290,7 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 
 		else:
 			log.debugWarning(
-				"Unknown message: id {id!r}, payload {payload!r}".format(id=msgId, payload=payload),
+				f"Unknown message: id {msgId!r}, payload {payload!r}",
 			)
 
 	def _hidOnReceive(self, data: bytes):
@@ -276,7 +309,7 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 		elif rId == HR_POWEROFF:
 			log.debug("Powering off")
 		else:
-			log.debugWarning("Unknown report: %r" % data)
+			log.debugWarning("Unknown report: %r" % data)  # noqa: UP031
 
 	def _handleKeyRelease(self):
 		if self._ignoreKeyReleases or not self._keysDown:
@@ -289,7 +322,7 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 		# so they should be ignored.
 		self._ignoreKeyReleases = True
 
-	def display(self, cells: List[int]):
+	def display(self, cells: list[int]):
 		# cells will already be padded up to numCells.
 		cellBytes = b"".join(intToByte(cell) for cell in cells)
 		if self.isHid:
@@ -311,11 +344,12 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 	gestureMap = inputCore.GlobalGestureMap(
 		{
 			"globalCommands.GlobalCommands": {
-				"braille_scrollBack": ("br(brailliantB):left",),
-				"braille_scrollForward": ("br(brailliantB):right",),
-				"braille_previousLine": ("br(brailliantB):up",),
-				"braille_nextLine": ("br(brailliantB):down",),
+				"braille_scrollBack": ("br(brailliantB):left", "br(brailliantB):c2"),
+				"braille_scrollForward": ("br(brailliantB):right", "br(brailliantB):c5"),
+				"braille_previousLine": ("br(brailliantB):up", "br(brailliantB):c1"),
+				"braille_nextLine": ("br(brailliantB):down", "br(brailliantB):c3"),
 				"braille_routeTo": ("br(brailliantB):routing",),
+				"braille_selectRange": ("br(brailliantB):multiRouting",),
 				"braille_toggleTether": ("br(brailliantB):up+down",),
 				"kb:upArrow": ("br(brailliantB):space+dot1", "br(brailliantB):stickUp"),
 				"kb:downArrow": ("br(brailliantB):space+dot4", "br(brailliantB):stickDown"),
@@ -345,15 +379,16 @@ class BrailleDisplayDriver(braille.BrailleDisplayDriver):
 	)
 
 
-class InputGesture(braille.BrailleDisplayGesture, brailleInput.BrailleInputGesture):
+class InputGesture(braille.display.gesture.BrailleDisplayGesture, braille.input.gesture.BrailleInputGesture):
 	source = BrailleDisplayDriver.name
 
 	def __init__(self, keys):
-		super(InputGesture, self).__init__()
+		super().__init__()
 		self.keyCodes = set(keys)
 
 		self.keyNames = names = []
 		isBrailleInput = True
+		routingIndexes: list[int] = []
 		for key in self.keyCodes:
 			if isBrailleInput:
 				if DOT1_KEY <= key <= DOT8_KEY:
@@ -366,12 +401,15 @@ class InputGesture(braille.BrailleDisplayGesture, brailleInput.BrailleInputGestu
 					self.dots = 0
 					self.space = False
 			if key >= FIRST_ROUTING_KEY:
-				names.append("routing")
-				self.routingIndex = key - FIRST_ROUTING_KEY
+				routingIndexes.append(key - FIRST_ROUTING_KEY)
 			else:
 				try:
 					names.append(KEY_NAMES[key])
 				except KeyError:
-					log.debugWarning("Unknown key with id %d" % key)
+					log.debugWarning("Unknown key with id %d" % key)  # noqa: UP031
+		if routingIndexes:
+			routingIndexes.sort()
+			self.cellIndexes = routingIndexes
+			names.append(self.idForCellCount(len(routingIndexes)))
 
 		self.id = "+".join(names)

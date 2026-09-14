@@ -2,30 +2,104 @@
 
 [TOC]
 
-
-
 ## Introduction {#introduction}
 
 This guide provides information concerning NVDA development, including translation and the development of components for NVDA.
 
 ### Add-on API stability {#API}
 
-The NVDA Add-on API includes all NVDA internals, except symbols that are prefixed with an underscore.
+#### Definition of the public API
 
-The NVDA Add-on API changes over time, for example because of the addition of new features, removal or replacement of outdated libraries, deprecation of unused or replaced code and methodologies, and changes to Python.
-Important changes to the API are announced on the [NVDA API mailing list](https://groups.google.com/a/nvaccess.org/g/nvda-api/about).
-Changes relevant to developers are also announced via the [NVDA changes file](https://www.nvaccess.org/files/nvda/documentation/changes.html).
-Any changes to the API policy outlined in this section will be conveyed via these two channels.
+The NVDA Add-on API consists of all NVDA Python objects, classes and functions, excluding symbols prefixed with an underscore (`_`), transitive imports and Python packages.
 
-API breaking releases happen at most once per year, these are `.1` releases, e.g. `2022.1`.
-The API remains backwards compatible between breaking releases.
-API breaking changes should be considered relatively stable in the first beta: e.g. `2022.1.beta1`.
+* **Public symbols (e.g. `gui.mainFrame`):**
+These form the supported contract.
+We strive to maintain backward compatibility for these symbols according to the schedule below.
+* **Private symbols (e.g. `_doInstall`):**
+These are internal implementation details.
+Code is considered private if it begins with a leading underscore.
+This also includes anything "below" the underscore.
+For example, `package.module._Class`, `package._module.Class`, and `_package.module.Class` are all internal.
+They may change or disappear in any release without notice.
+Add-ons relying on private symbols do so at their own risk.
+* **Pip packages:**
+These may be updated, downgraded or removed at any time.
+It is recommended to package any pip dependency directly with your add-on, rather than using NVDA's version of the package.
+The exception to this is `wxPython`, where any breaking changes from `wxPython` will be treated as an API breaking change.
 
-API features may become deprecated over time.
-Deprecated API features may have a scheduled removal date, a future breaking release (e.g. `2022.1`).
-Deprecations may also have no scheduled removal date, and will remain supported until it is no longer reasonable.
-Note, the roadmap for removals is 'best effort' and may be subject to change.
-Please open a GitHub issue if the described add-on API changes result in the API no longer meeting the needs of an add-on you develop or maintain.
+#### The API release cycle
+
+To balance progress with ecosystem stability, NVDA follows a predictable schedule for API changes:
+
+* **Annual API-breaking release (major releases, e.g. 2026.1):**
+This is the only release window where signature breaking changes (defined below) are permitted.
+This allows us to remove technical debt and refactor core code.
+* **Standard releases (minor & patch releases, e.g. 2026.2, 2026.3.1):**
+These releases focus on features and stability.
+Existing API signatures are preserved, but new API features may be added.
+This includes behavioural refinements and bug fixes (see below).
+
+#### Classification of API changes
+
+To provide clarity on what add-on developers can expect, we categorise changes into three tiers:
+
+##### Signature breaking changes
+
+* **Examples:** Renaming a function, removing a module, changing a function’s return type or removing/reordering positional arguments.
+* **Policy:** These occur only in the .1 release (e.g. 2026.1).
+
+##### Behavioural refinements & bug fixes
+
+A change where the code continues to run (the signature matches), but the logic or outcome changes to correct a defect or security flaw.
+
+* **Examples:** Fixing a math error or optimising an algorithm (e.g. changing a sort order).
+* **Policy:** These are permitted in any major or minor release (e.g. 2026.1, 2026.2).
+* We recognise that some add-ons may rely on incorrect behaviour or bugs.
+However, preserving a bug to maintain backwards compatibility significantly hampers NVDA's development.
+If a public function was documented to do X but was actually doing Y, changing it to correctly do X is considered a bug fix, not a breaking change.
+
+##### Security improvements
+
+Security takes precedence over backward compatibility.
+We will make every effort to document these changes clearly (see below).
+
+* **Examples:** Privilege escalation or insecure file handling.
+* **Policy:** These are permitted in any release but are primarily deployed in patch releases (e.g. 2026.1.2).
+* In the rare event that a security fix requires a signature breaking change outside of the annual API-breaking release:
+* If the change is likely to cause instability in existing add-ons, we will treat the patch as an official API-breaking release (forcing a global add-on compatibility update) to ensure user safety.
+* If our analysis indicates the affected API is not widely used, we reserve the right to deploy the fix without forcing a global compatibility update.
+
+#### API deprecation strategy
+
+We aim to avoid silent breaks of add-on code.
+When removing or changing APIs in a breaking release (e.g. 2026.1) or due to an urgent security improvement (e.g. 2026.1.2):
+
+1. We will mark functions as deprecated, where possible, in the releases leading up to the break (e.g. raising a `DeprecationWarning` in 2025.4).
+1. All API breaking changes will be listed in the "Changes for Developers" section of the What's New document, and the [NVDA Add-on API Announcements](https://groups.google.com/a/nvaccess.org/g/nvda-api) email group.
+
+#### Stability of transitive imports in the API {#APIImports}
+
+Make sure to import your code from the original module by checking the NVDA source code.
+
+e.g. if a class is located at `foo.py`, you should import it as follows:
+
+```python
+from foo import Foo
+```
+
+If `bar.py` imports `Foo` you cannot rely on importing `Foo` from `bar`.
+i.e. you must import it directly from `foo`.
+
+The following is not supported in the API, as the import in `bar` could be removed at any time.
+
+```python
+from bar import Foo
+```
+
+#### Stability of pip packages {#APIIncludedPipPackages}
+
+Pip packages may be updated, downgraded, or removed at any time.
+It is recommended to package any pip dependency you share with NVDA directly with your add-on, rather than using NVDA's version of the package.
 
 ### A Note About Python {#aboutPython}
 
@@ -74,7 +148,7 @@ It is assumed that characters will have the same description regardless of their
 
 #### Translating this file {#TranslatingCharacterDescriptionsFile}
 
-Translation of `characterDescriptions.dic` happens on SVN following [the automatic workflow process](https://github.com/nvaccess/nvda/wiki/TranslatingUsingAutomaticProcess).
+Translation of `characterDescriptions.dic` happens via [Pull Request to NVDA](https://github.com/nvaccess/nvda/blob/master/projectDocs/translating/github.md).
 
 For a full example and reference, please look at [the English `characterDescriptions.dic` file](https://github.com/nvaccess/nvda/blob/master/source/locale/en/characterDescriptions.dic).
 
@@ -90,11 +164,6 @@ Blank lines and lines beginning with a "`#`" character are ignored.
 All locales implicitly inherit the symbol information for English, though any of this information can be overridden.
 
 The file contains two sections, [complex symbols](#complexSymbols) and [symbols](#symbolInformation).
-
-#### Translating this file {#TranslatingSymbolsFile}
-
-Translation of `symbols.dic` happens on SVN following [the automatic workflow process](https://github.com/nvaccess/nvda/wiki/TranslatingUsingAutomaticProcess).
-See the file [locale\en\symbols.dic](https://github.com/nvaccess/nvda/blob/master/source/locale/en/symbols.dic) for the English definitions which are inherited for all locales.
 
 #### Defining Complex Symbols {#complexSymbols}
 
@@ -206,6 +275,12 @@ You would also include something like the following in the main symbols section:
 ```
 thousands separator	comma	all	norep
 ```
+
+#### Translating this file {#TranslatingSymbolsFile}
+
+Translation of `symbols.dic` happens via [Pull Request to NVDA](https://github.com/nvaccess/nvda/blob/master/projectDocs/translating/github.md).
+
+See the file [locale\en\symbols.dic](https://github.com/nvaccess/nvda/blob/master/source/locale/en/symbols.dic) for the English definitions which are inherited for all locales.
 
 ### Gestures {#TranslatingGestures}
 
@@ -321,14 +396,11 @@ In this case, you will have to explore NVDA's source code to find this parent cl
 
 #### Translating this file {#TranslatingGesturesFile}
 
-Translations for `gestures.ini` happen on SVN following [the automatic workflow process](https://github.com/nvaccess/nvda/wiki/TranslatingUsingAutomaticProcess).
+Translation of `gestures.ini` happens via [Pull Request to NVDA](https://github.com/nvaccess/nvda/blob/master/projectDocs/translating/github.md).
 
-1. In your local copy of the screenReaderTranslations repository, check if the `gestures.ini` file exists, e.g. `d:\SVN\SRT\fr\gestures.ini`
-   * If this file does not exist, create it by copying it from the last version of NVDA.
-   * If it already exists, all is fine.
-2. In this file the sections correspond to the class to which the script belongs.
+1. In this file the sections correspond to the class to which the script belongs.
 If the class your looking for does not exist, create this section.
-3. Under the targeted section, add a line corresponding to the new shortcut. e.g.:
+1. Under the targeted section, add a line corresponding to the new shortcut. e.g.:
 
    ```
    toggleBold = kb:control+g, kb:control+shift+b
@@ -336,7 +408,7 @@ If the class your looking for does not exist, create this section.
 
    If a line already exists for the script name, but you want to modify the shortcut, add the new shortcut on the same line, separating each shortcut with a comma ("`,`").
 
-4. If you want to unmap the original shortcut, just map it to `None`, e.g.:
+1. If you want to unmap the original shortcut, just map it to `None`, e.g.:
 
    ```
    None = kb:control+b
@@ -344,10 +416,8 @@ If the class your looking for does not exist, create this section.
 
    Unmapping the original shortcut is only required if this shortcut does not match any other remapped locale shortcut.
 
-5. Save your file in UTF-8 format.
-6. Commit your changes to the screenReaderTranslations repo.
-
 ## Plugins {#plugins}
+
 ### Overview {#pluginsOverview}
 
 Plugins allow you to customize the way NVDA behaves overall or within a particular application.
@@ -477,7 +547,7 @@ As with other examples in this guide, remember to delete the created app module 
 ### App modules for hosted apps {#appModulesForHostedApps}
 
 Some executables host various apps inside or are employed by an app to display their interfaces.
-These include `javaw.exe` for running various Java programs, `wwahost.exe` for some apps in Windows 8 and later, and `msedgewebview2.exe` for displaying web-like interfaces on apps employing Edge WebView2 runtime.
+These include `javaw.exe` for running various Java programs, `wwahost.exe` for some web-based apps, and `msedgewebview2.exe` for displaying web-like interfaces on apps employing Edge WebView2 runtime.
 
 If an app runs inside a host executable or employs a different app to display the interface, the name of the app module must be the name as defined by the host or the interface executable, which can be found through the `AppModule.appName` property.
 For example, an app module for a Java app named "`test`" hosted inside `javaw.exe` must be named `test.py`.
@@ -555,20 +625,20 @@ From anywhere, you can now press `NVDA+shift+v` to have NVDA's version spoken an
 import globalPluginHandler
 from scriptHandler import script
 import ui
-import versionInfo
+import buildVersion
 
 
 class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	@script(gesture="kb:NVDA+shift+v")
 	def script_announceNVDAVersion(self, gesture):
-		ui.message(versionInfo.version)
+		ui.message(buildVersion.version)
 ```
 
 This Global Plugin file starts with two comment lines, which describe what the file is for.
 
 It then imports the globalPluginHandler module, so that the Global Plugin has access to the base GlobalPlugin class.
 
-It also imports a few other modules, namely ui, versionInfo and scriptHandler, which this specific plugin needs in order for it to perform the necessary actions to announce the version.
+It also imports a few other modules, namely ui, buildVersion and scriptHandler, which this specific plugin needs in order for it to perform the necessary actions to announce the version.
 
 Next, it defines a class called GlobalPlugin, which is inherited from globalPluginHandler.GlobalPlugin.
 
@@ -964,10 +1034,10 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 ## Packaging Code as NVDA Add-ons {#Addons}
 
-Add-ons make it easy for users to share and install plugins, drivers, speech symbol dictionaries and braille translation tables.
+Add-ons make it easy for users to share and install plugins, drivers, speech pronunciation/symbol dictionaries and braille translation tables.
 They can be packaged in to a single NVDA add-on package, which the user can then install into a copy of NVDA via the Add-on Store found under Tools in the NVDA menu.
 An add-on package is simply a standard zip archive with the file extension of "`nvda-addon`".
-It can contain a manifest file, install/uninstall code and directories containing plugins, drivers, speech symbol dictionaries and braille translation tables.
+It can contain a manifest file, install/uninstall code and directories containing plugins, drivers, speech dictionaries, symbol dictionaries and braille translation tables.
 
 ### Non-ASCII File Names in Zip Archives {#nonASCIIFileNamesInZip}
 
@@ -1001,8 +1071,14 @@ When uploading to the Add-on Store certain requirements apply:
   * Add-on versions are expected to be unique for the addon name and channel, meaning that a beta, stable and dev version of the same add-on cannot share a version number.
   This is so there can be a unique ordering of newest to oldest.
   * The suggested convention is to increment the patch version number for dev versions, increment the minor version number for beta versions, and increment the major version number for stable versions.
-* author (string, required): The author of this add-on, preferably in the form Full Name <email address>; e.g. Michael Curran <<mick@example.com>>.
+* author (string, required): The author of this add-on, preferably in the form `Full Name <email address>`; e.g. `Michael Curran <mick@example.com>`.
 * description (string): A sentence or two describing what the add-on does.
+* changelog (string): A list of changes between previous and latest add-on releases.
+  * This is used to inform users about changes included in the add-on release.
+  * Changes can include new features, changes, bug fixes, and localization updates if any.
+  * Markdown can be used to format the list of changes, as they will be converted to HTML to be shown in browse mode.
+  * When releasing add-on updates, changes should be edited if possible.
+  This means not all add-on releases will include notable changes.
 * url (string): A URL where this add-on, further info and upgrades can be found.
   * Starting the URL with `https://` is required for submitting to the Add-on Store.
 * docFileName (string): The name of the main documentation file for this add-on; e.g. readme.html. See the [Add-on Documentation](#AddonDoc) section for more details.
@@ -1029,8 +1105,8 @@ The lastTestedNVDAVersion field in particular is used to ensure that users can b
 It allows the add-on author to make an assurance that the add-on will not cause instability, or break the users system.
 When this is not provided, or is less than the current version of NVDA (ignoring minor point updates e.g. 2018.3.1) then the user will be warned not to install the add-on.
 
-The manifest can also specify information regarding any additional speech symbol dictionaries or braille translation tables provided by the add-on.
-Please refer to the [speech symbol dictionaries](#AddonSymbolDictionaries) and [braille translation tables](#BrailleTables) sections.
+The manifest can also specify information regarding any additional speech dictionaries, symbol or braille translation tables provided by the add-on.
+Please refer to the [speech dictionaries](#AddonSpeechDictionaries), [symbol dictionaries](#AddonSymbolDictionaries) and [braille translation tables](#BrailleTables) sections.
 
 #### An Example Manifest File {#manifestExample}
 
@@ -1054,7 +1130,8 @@ The following plugins and drivers can be included in an add-on:
 * Braille display drivers: Place them in a `brailleDisplayDrivers` directory in the archive.
 * Global plugins: Place them in a `globalPlugins` directory in the archive.
 * Synthesizer drivers: Place them in a `synthDrivers` directory in the archive.
-* [Speech symbol dictionaries](#AddonSymbolDictionaries): Place them in the directory for one or more [locales](#localizingAddons) with a file name of `symbols-<name>.dic`, e.g. `locale\en\symbols-greek.dic`.
+* [Speech dictionaries](#AddonSpeechDictionaries): Place them in the `speechDicts` directory with a file name with the `.dic` extension, e.g. `speechDicts\pronunciation.dic`.
+* [Symbol dictionaries](#AddonSymbolDictionaries): Place them in the directory for one or more [locales](#localizingAddons) with a file name of `symbols-<name>.dic`, e.g. `locale\en\symbols-greek.dic`.
 * [Braille translation tables](#BrailleTables): Place them in a `brailleTables` directory in the archive.
 
 ### Optional install / Uninstall code {#installUninstallCode}
@@ -1097,46 +1174,155 @@ To allow plugins in your add-on to access gettext message information via calls 
 This function cannot be called in modules that do not belong to an add-on, e.g. in a scratchpad subdirectory.
 For more information about gettext and NVDA translation in general, please read the [Translating NVDA page](https://github.com/nvaccess/nvda/blob/master/projectDocs/translating/readme.md)
 
-#### Speech symbol dictionaries {#AddonSymbolDictionaries}
+#### Symbol dictionaries {#AddonSymbolDictionaries}
 
 You can provide custom speech symbol dictionaries in add-ons to improve symbol pronunciation.
 The process to create custom speech symbol dictionaries is very similar to that of the [translation process of existing symbols](#symbolPronunciation).
 Note that [complex symbols](#complexSymbols) are not supported.
 
-Custom dictionaries must be placed in a language directory and have a filename in the form `symbols-<name>.dic`, where `<name>` is the name that has to be provided in the add-ons manifest.
+Custom symbol dictionaries must be placed in a language directory and have a filename in the form `symbols-<name>.dic`, where `<name>` is the name that has to be provided in the add-ons manifest.
 All locales implicitly inherit the symbol information for English, though any of this information can be overridden for specific locales.
 
-When adding a dictionary not marked as mandatory, some information must be provided such as its display name, since it should be shown in the speech category of the settings dialog.
-A dictionary can also be marked mandatory, in which case it is always enabled with the add-on.
-When an add-on ships with dictionaries, this information is included in its manifest in the optional `symbolDictionaries` section.
+When adding a symbol dictionary not marked as mandatory, some information must be provided such as its display name, since it should be shown in the speech category of the settings dialog.
+A symbol dictionary can also be marked mandatory, in which case it is always enabled with the add-on.
+When an add-on ships with symbol dictionaries, this information is included in its manifest in the optional `symbolDictionaries` section.
 For example:
 
 ```ini
 [symbolDictionaries]
-[[greek]]
-displayName = Greek
-mandatory = false
+	[[greek]]
+		displayName = Greek
+		mandatory = false
 
-[[hebrew]]
-displayName = Biblical Hebrew
-mandatory = true
+	[[hebrew]]
+		displayName = Biblical Hebrew
+		mandatory = true
 ```
 
-In the above example, `greek` is a dictionary that is optional and will be listed in the speech category of NVDA's settings dialog under the "Extra dictionaries for character and symbol processing" setting.
+In the above example, `greek` is a symbol dictionary that is optional and will be listed in the speech category of NVDA's settings dialog under the "Extra dictionaries for character and symbol processing" setting.
 Its file will be stored as `locale\en\symbols-greek.dic`, whereas French translations of the symbols are stored in `locale\fr\symbols-greek.dic`.
 When using NVDA in French, symbols that aren't defined in the French dictionary inherit the symbol information for English.
 
 Also in the example, the `hebrew` dictionary is marked mandatory and will therefore always be enabled as long as the add-on is active.
 Its file will be stored as `locale\en\symbols-hebrew.dic`, whereas French translations of the symbols are stored in `locale\fr\symbols-hebrew.dic`.
 
-Note that for the display name of the dictionary to be translated, an entry should be added to a [locale manifest](#localeManifest).
+Note that for the display name of the symbol dictionary to be translated, an entry should be added to a [locale manifest](#localeManifest).
 For example, add the following to `locale\fr\manifest.ini`:
 
 ```ini
 [symbolDictionaries]
-[[hebrew]]
-displayName = Hébreu Biblique
+	[[hebrew]]
+		displayName = Hébreu Biblique
 ```
+
+### Speech dictionaries {#AddonSpeechDictionaries}
+
+You can provide custom speech dictionaries in add-ons to improve pronunciation of words that are usually pronounced incorrectly by speech synthesizers.
+Custom dictionaries must be placed in the `speechDicts` directory and have a filename with the `.dic` extension.
+For example, when your dictionary is named `<name>.dic`, `<name>` is the name that has to be provided in the add-ons manifest.
+
+When adding a speech dictionary not marked as mandatory, some information must be provided such as its display name, since it should be shown in the speech category of the settings dialog.
+A speech dictionary can also be marked mandatory, in which case it is always enabled with the add-on.
+When an add-on ships with speech dictionaries, this information is included in its manifest in the optional `speechDictionaries` section.
+For example:
+
+```ini
+[speechDictionaries]
+	[[pronunciation]]
+		displayName = Dodgy Dictionary
+		mandatory = false
+```
+
+In the above example, `pronunciation` is a dictionary that is optional and will be listed in the speech category of NVDA's settings dialog under the "Speech Dictionaries" setting.
+Its file will be stored as `speechDicts\pronunciation.dic`.
+When you mark the dictionary as mandatory, it will be always enabled as long as the add-on is active.
+
+Note that for the display name of the dictionary to be translated, an entry should be added to a [locale manifest](#localeManifest).
+For example, add the following to `locale\fr\manifest.ini`:
+
+```ini
+[speechDictionaries]
+	[[pronunciation]]
+		displayName = Dictionnaire douteux
+```
+
+Unlike symbol dictionaries, speech dictionaries are currently locale-agnostic.
+Therefore, an active dictionary is always active, regardless of the current language.
+
+#### Creating speech dictionaries {#AddonCreatingSpeechDictionaries}
+
+A speech dictionary file contains dictionary rules, one per line.
+Each dictionary rule consists of four tab-separated fields on a single line:
+
+```
+<pattern>	<replacement>	<caseSensitive>	<type>
+```
+
+The fields are:
+
+1. `pattern`: The text pattern to match.
+  Hash characters (`#`) must be escaped as `\#`.
+2. `replacement`: The text to replace the matched pattern with.
+  Hash characters (`#`) must be escaped as `\#`.
+3. `caseSensitive`: A numeric flag indicating case sensitivity:
+	* `0`: Case insensitive matching
+	* `1`: Case sensitive matching
+4. `type`: A number indicating the type of pattern matching to use:
+	* `0`: Anywhere - Pattern can match anywhere in the text (literal string)
+	* `1`: Regular expression - Pattern is treated as a Python regular expression
+	* `2`: Whole word - Pattern must match a complete word with word boundaries on both sides
+	* `3`: Part of word - Pattern must be preceded or followed by a word character (letter, digit, underscore)
+	* `4`: Start of word - Pattern must have a word boundary at the start and a word character at the end
+	* `5`: End of word - Pattern must have a word character at the start and a word boundary at the end
+	* `6`: Unix shell-style wildcards - Pattern uses Unix shell wildcards (`*`, `?`, `[]`, etc.)
+
+Comments can be added before entries to provide descriptions.
+A comment is preceded by a `#` (hash sign) and applies to the next entry line that appears after it.
+
+##### Examples
+
+```
+# Expand NVDA acronym
+NVDA	NonVisual Desktop Access	1	2
+```
+
+This means that the word "NVDA" (case sensitive, whole word) should be spoken as "NonVisual Desktop Access".
+
+```
+# Convert percentages to spoken format
+(\d+)%	\1 percent	0	1
+```
+
+This uses a regular expression to match numbers followed by a percent sign and replaces them with the number followed by the word "percent".
+For example, "50%" becomes "50 percent".
+
+```
+# Change "LOL" to full phrase
+LOL	laughing out loud	0	2
+```
+
+This means that the word "LOL" (case insensitive, whole word) should be spoken as "laughing out loud".
+
+```
+# Match any .txt file using wildcards
+*.txt	text file	0	6
+```
+
+This uses Unix shell-style wildcards to match any string ending in ".txt" and replaces it with "text file".
+
+For more information on speech dictionaries, refer to the [User Guide](https://download.nvaccess.org/documentation/userGuide.html#SpeechDictionaries).
+
+#### Manipulating existing dictionaries
+
+In addition to provide speech dictionaries, add-ons can manipulate existing speech dictionaries.
+
+```python
+tempDict = speechDictHandler.definitions.getDictionaryDefinition(DictionaryType.TEMP).dictionary
+for entry in tempDict:
+	tempDict.remove(entry)
+```
+
+For more information, look at `speechDictHandler/types.py`.
 
 ### Add-on Documentation {#AddonDoc}
 
@@ -1225,12 +1411,13 @@ Pressing control+l clears the output.
 
 The result of the last executed command is stored in the "_" global variable.
 This shadows the gettext function which is stored as a built-in with the same name.
-It can be unshadowed by executing "del _" and avoided altogether by executing "_ = _".
+It can be unshadowed by executing `del _` and avoided altogether by executing `_ = _`.
 
 Closing the console window (with escape or alt+F4) simply hides it.
 This allows the user to return to the session as it was left when it was closed, including history and variables.
 
 ### Namespace {#PythonConsoleNamespace}
+
 #### Automatic Imports {#pythonConsoleAutoImports}
 
 For convenience, the following modules and variables are automatically imported in the console:
@@ -1243,13 +1430,16 @@ See: pythonConsole.PythonConsole.initNamespace
 Whenever NVDA+control+z is pressed, certain variables available in the console will be assigned according to the current state of NVDA.
 These variables are:
 
-* focus: The current focus object
-* focusAnc: The ancestors of the current focus object
-* fdl: Focus difference level; i.e. the level at which the ancestors for the current and previous focus differ
-* fg: The current foreground object
-* nav: The current navigator object
-* mouse: The current mouse object
-* brlRegions: The braille regions from the active braille buffer
+* `focus`: The current focus object
+* `focusAnc`: The ancestors of the current focus object
+* `fdl`: Focus difference level; i.e. the level at which the ancestors for the current and previous focus differ
+* `fg`: The current foreground object
+* `nav`: The current navigator object
+* `caretObj`: The object which contains the caret (focus or tree interceptor if any)
+* `caretPos`: A text info at the position of the caret
+* `review`: The current `TextInfo` instance representing the user's review position
+* `mouse`: The current mouse object
+* `brlRegions`: The braille regions from the active braille buffer
 
 ### Tab completion {#pythonConsoleTab}
 
@@ -1295,13 +1485,13 @@ NVDA's `extensionPoints` module allows code in different parts of NVDA, or in ad
 
 There are five kinds of extension point:
 
-| Type |Purpose|
-|---|---|
-|`Action` |Allows some code to find out what other code is doing. For example, an add-on can be notified before or after a config profile changes.|
-|`Filter` |Edits data. A filter registered in the speech module, might allow changing speech strings before they are spoken.|
-|`Decider` |Runs each registered handler until one of them returns `False`. If one does, it can be used to prevent the invoking code from running.|
-|`AccumulatingDecider` |Like `Decider`, but always runs all of its registered handlers, and only decides if one of them failed at the end. The expected result of each is `True` by default, though expecting `False` is possible.|
-|`Chain` |Allows registering handlers that return iterables (mainly generators). Calling `iter` on the `Chain` returns a generator that iterates over all the handlers.|
+| Type | Purpose |
+| --- | --- |
+| `Action` | Allows some code to find out what other code is doing. For example, an add-on can be notified before or after a config profile changes. |
+| `Filter` | Edits data. A filter registered in the speech module, might allow changing speech strings before they are spoken. |
+| `Decider` | Runs each registered handler until one of them returns `False`. If one does, it can be used to prevent the invoking code from running. |
+| `AccumulatingDecider` | Like `Decider`, but always runs all of its registered handlers, and only decides if one of them failed at the end. The expected result of each is `True` by default, though expecting `False` is possible. |
+| `Chain` | Allows registering handlers that return iterables (mainly generators). Calling `iter` on the `Chain` returns a generator that iterates over all the handlers. |
 
 The sections below provide the list of currently defined extension points in NVDA, along with brief descriptions for them.
 Please see code documentation in the associated files, or the code itself, for further explanation.
@@ -1311,132 +1501,467 @@ For examples of how to define and use new extension points, please see the code 
 
 ### braille {#brailleExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Filter` |`filter_displaySize` | [Deprecated] Allows components or add-ons to change the display size used for braille output.|
-|`Filter` |`filter_displayDimensions` | Allows components or add-ons to change the number of rows and columns of the display used for braille output.|
-|`Action` |`displaySizeChanged` |Notifies of display size changes.|
-|`Action` |`pre_writeCells` |Notifies when cells are about to be written to a braille display|
-|`Action` |`displayChanged` |Notifies of braille display changes.|
-|`Decider` |`decide_enabled` |Allows deciding whether the braille handler should be forcefully disabled.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Filter` | `filter_displaySize` | [Deprecated] Allows components or add-ons to change the display size used for braille output. |
+| `Filter` | `filter_displayDimensions` | Allows components or add-ons to change the number of rows and columns of the display used for braille output. |
+| `Action` | `displaySizeChanged` | Notifies of display size changes. |
+| `Action` | `pre_writeCells` | Notifies when cells are about to be written to a braille display |
+| `Action` | `displayChanged` | Notifies of braille display changes. |
+| `Decider` | `decide_enabled` | Allows deciding whether the braille handler should be forcefully disabled. |
 
 ### appModuleHandler {#appModuleHandlerExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`post_appSwitch` |Triggered when the foreground application changes|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `post_appSwitch` | Triggered when the foreground application changes |
 
 ### addonHandler {#addonHandlerExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`AccumulatingDecider` |`isCLIParamKnown` |Allows adding NVDA commandline parameters which apply to plugins. See [this section of the Dev Guide](#PluginCLIArgs) for more information.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `AccumulatingDecider` | `isCLIParamKnown` | Allows adding NVDA commandline parameters which apply to plugins. See [this section of the Dev Guide](#PluginCLIArgs) for more information. |
 
 ### brailleViewer {#brailleViewerExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`postBrailleViewerToolToggledAction` |Triggered every time the Braille Viewer is created / shown or hidden / destroyed.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `postBrailleViewerToolToggledAction` | Triggered every time the Braille Viewer is created / shown or hidden / destroyed. |
 
 ### config {#configExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`post_configProfileSwitch` |Notifies after the configuration profile has been switched.|
-|`Action` |`pre_configSave` |Notifies before NVDA's configuration is saved to disk.|
-|`Action` |`post_configSave` |Notifies after NVDA's configuration has been saved to disk.|
-|`Action` |`pre_configReset` |Notifies before configuration is reloaded from disk or factory defaults are applied.|
-|`Action` |`post_configReset` |Notifies after configuration has been reloaded from disk or factory defaults were applied.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `post_configProfileSwitch` | Notifies after the configuration profile has been switched. |
+| `Action` | `pre_configSave` | Notifies before NVDA's configuration is saved to disk. |
+| `Action` | `post_configSave` | Notifies after NVDA's configuration has been saved to disk. |
+| `Action` | `pre_configReset` | Notifies before configuration is reloaded from disk or factory defaults are applied. |
+| `Action` | `post_configReset` | Notifies after configuration has been reloaded from disk or factory defaults were applied. |
 
 ### core {#coreExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`postNvdaStartup` |Notifies after NVDA has finished starting up.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `postNvdaStartup` | Notifies after NVDA has finished starting up. |
+
+### gui.message {#guiMessageExtPts}
+
+Unlike the other modules listed in this chapter, `gui.message` does not define a shared extension point instance.
+Instead, `DisplayableError.OnDisplayableErrorT` is an `Action` type: each component that needs to route user-visible errors out of non-GUI code creates its own instance.
+See [Displaying errors to the user](#DisplayableError) for a full description and examples.
+
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `DisplayableError.OnDisplayableErrorT` (instantiated per component) | Notifies a registered handler (usually a GUI component) that a `DisplayableError` has occurred, allowing the handler to decide how to present the error to the user. |
 
 ### inputCore {#inputCoreExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Decider` |`decide_executeGesture` |Notifies when a gesture is about to be executed, allowing other code to decide if it should be.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Decider` | `decide_handleRawKey` | Notifies when a raw keyboard event is received, before any NVDA processing, allowing other code to decide if it should be handled. |
+| `Decider` | `decide_executeGesture` | Notifies when a gesture is about to be executed, allowing other code to decide if it should be. |
 
 ### logHandler {#logHandlerExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`_onErrorSoundRequested` |Triggered every time an error sound needs to be played. This extension point should not be used directly but retrieved calling `getOnErrorSoundRequested()` instead.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `_onErrorSoundRequested` | Triggered every time an error sound needs to be played. This extension point should not be used directly but retrieved calling `getOnErrorSoundRequested()` instead. |
 
 ### nvwave {#nvwaveExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Decider` |`decide_playWaveFile` |Notifies when a wave file is about to be played, allowing other code to decide if it should be.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Decider` | `decide_playWaveFile` | Notifies when a wave file is about to be played, allowing other code to decide if it should be. |
 
 ### speech {#speechExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`speechCanceled` |Triggered when speech is canceled.|
-|`Action` |`pre_speechCanceled` |Triggered before speech is canceled.|
-|`Action` |`pre_speech` |Triggered before NVDA handles prepared speech.|
-|`Filter` |`filter_speechSequence` |Allows components or add-ons to filter speech sequence before it passes to the synth driver.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `speechCanceled` | Triggered when speech is canceled. |
+| `Action` | `pre_speechCanceled` | Triggered before speech is canceled. |
+| `Action` | `pre_speech` | Triggered before NVDA handles prepared speech. |
+| `Action` | `post_speechPaused` | Triggered when speech is paused or resumed. |
+| `Action` | `pre_speechQueued` | Triggered after speech is processed and normalized and directly before it is enqueued. |
+| `Filter` | `filter_speechSequence` | Allows components or add-ons to filter speech sequence before it passes to the synth driver. |
 
 ### synthDriverHandler {#synthDriverHandlerExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`synthIndexReached` |Notifies when a synthesizer reaches an index during speech.|
-|`Action` |`synthDoneSpeaking` |Notifies when a synthesizer finishes speaking.|
-|`Action` |`synthChanged` |Notifies of synthesizer changes.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `synthIndexReached` | Notifies when a synthesizer reaches an index during speech. |
+| `Action` | `synthDoneSpeaking` | Notifies when a synthesizer finishes speaking. |
+| `Action` | `synthChanged` | Notifies of synthesizer changes. |
+| `Action` | `pre_synthSpeak` | Notifies when the current synthesizer is about to speak something. |
 
 ### tones {#tonesExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Decider` |`decide_beep` |Notifies when a beep is about to be generated and played, allowing a component to decide whether it should be.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Decider` | `decide_beep` | Notifies when a beep is about to be generated and played, allowing a component to decide whether it should be. |
 
 ### treeInterceptorHandler {#treeInterceptorHandlerExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`post_browseModeStateChange` |Notifies when browse mode state changes.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `post_browseModeStateChange` | Notifies when browse mode state changes. |
 
 ### utils.security {#utils_securityExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`post_sessionLockStateChanged` |Notifies when a session lock or unlock event occurs.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `post_sessionLockStateChanged` | Notifies when a session lock or unlock event occurs. |
+
+### winAPI._displayTracking {#winAPI_displayTrackingExtPts}
+
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `displayChanged` | Notifies when display configuration changes (resolution, monitor setup, etc.). Handlers receive the `OrientationState` as an argument. |
 
 ### winAPI.messageWindow {#winAPI_messageWindowExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`pre_handleWindowMessage` |Notifies when NVDA receives a window message, allowing components to perform an action when certain system events occur.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `pre_handleWindowMessage` | Notifies when NVDA receives a window message, allowing components to perform an action when certain system events occur. |
 
 ### winAPI.secureDesktop {#winAPI_secureDesktopExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Action` |`winAPI.secureDesktop.post_secureDesktopStateChange` |Notifies when the user has switched to/from the secure desktop|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Action` | `winAPI.secureDesktop.post_secureDesktopStateChange` | Notifies when the user has switched to/from the secure desktop |
 
 ### bdDetect {#bdDetectExtPts}
 
-| Type |Extension Point |Description|
-|---|---|---|
-|`Chain` |`scanForDevices` |Can be iterated to scan for braille devices.|
+| Type | Extension Point | Description |
+| --- | --- | --- |
+| `Chain` | `scanForDevices` | Can be iterated to scan for braille devices. |
 
 ### vision.visionHandlerExtensionPoints.EventExtensionPoints {#visionExtPts}
 
 These extension points are expected to be used and registered to differently than other extension points.
 Please see the `EventExtensionPoints` class documentation for more information, and detailed descriptions.
 
-| Type |Extension Point |Notifies a vision enhancement provider when ...|
-|---|---|---|
-|`Action` |`post_objectUpdate` |an object property has changed.|
-|`Action` |`post_focusChange` |the focused NVDAObject has changed.|
-|`Action` |`post_foregroundChange` |the foreground NVDAObject has changed.|
-|`Action` |`post_caretMove` |a physical caret has moved.|
-|`Action` |`post_browseModeMove` |a virtual caret has moved.|
-|`Action` |`post_reviewMove` |the position of the review cursor has changed.|
-|`Action` |`post_mouseMove` |the mouse has moved.|
-|`Action` |`post_coreCycle` |the end of each core cycle has been reached.|
+| Type | Extension Point | Notifies a vision enhancement provider when ... |
+| --- | --- | --- |
+| `Action` | `post_objectUpdate` | an object property has changed. |
+| `Action` | `post_focusChange` | the focused NVDAObject has changed. |
+| `Action` | `post_foregroundChange` | the foreground NVDAObject has changed. |
+| `Action` | `post_caretMove` | a physical caret has moved. |
+| `Action` | `post_browseModeMove` | a virtual caret has moved. |
+| `Action` | `post_mathNavigation` | the math navigation position has changed. |
+| `Action` | `post_reviewMove` | the position of the review cursor has changed. |
+| `Action` | `post_mouseMove` | the mouse has moved. |
+| `Action` | `post_coreCycle` | the end of each core cycle has been reached. |
+
+## Communicating with the user
+
+### The message dialog API
+
+The message dialog API provides a flexible way of presenting interactive messages to the user.
+The messages are highly customisable, with options to change icons and sounds, button labels, return values, and close behaviour, as well as to attach your own callbacks.
+
+All classes that make up the message dialog API are importable from `gui.message`.
+While you are unlikely to need all of them, they are enumerated below:
+
+* `ReturnCode`: Possible return codes from modal `MessageDialog`s.
+* `EscapeCode`: Escape behaviour of `MessageDialog`s.
+* `DialogType`: Types of dialogs (sets the dialog's sound and icon).
+* `Button`: Button configuration data structure.
+* `DefaultButton`: Enumeration of pre-configured buttons.
+* `DefaultButtonSet`: Enumeration of common combinations of buttons.
+* `MessageDialog`: The actual dialog class.
+
+In many simple cases, you will be able to achieve what you need by simply creating a message dialog and calling `Show` or `ShowModal`. For example:
+
+```py
+from gui.message import MessageDialog
+from gui import mainFrame
+
+MessageDialog(
+	mainFrame,
+	_("Hello world!"),
+).Show()
+```
+
+This will show a non-modal (that is, non-blocking) dialog with the text "Hello world!" and an OK button.
+
+If you want the dialog to be modal (that is, to block the user from performing other actions in NVDA until they have responded to it), you can call `ShowModal` instead.
+
+With modal dialogs, the easiest way to respond to user input is via the return code.
+
+```py
+from gui.message import DefaultButtonSet, ReturnCode
+
+saveDialog = MessageDialog(
+	mainFrame,
+	_("Would you like to save your changes before exiting?"),
+	_("Save changes?"),
+	buttons=DefaultButtonSet.SAVE_NO_CANCEL
+)
+
+match saveDialog.ShowModal():
+	case ReturnCode.SAVE:
+		...  # Save the changes and close
+	case ReturnCode.NO:
+		...  # Discard changes and close
+	case ReturnCode.CANCEL:
+		...  # Do not close
+```
+
+For non-modal dialogs, the easiest way to respond to the user pressing a button is via callback methods.
+
+```py
+from gui.message import Payload
+
+def readChangelog(payload: Payload):
+	...  # Do something
+
+def downloadUpdate(payload: Payload):
+	...  # Do something
+
+def remindLater(payload: Payload):
+	...  # Do something
+
+updateDialog = MessageDialog(
+	mainFrame,
+	"An update is available. "
+	"Would you like to download it now?",
+	"Update",
+	buttons=None,
+).addYesButton(
+	callback=downloadUpdate
+).addNoButton(
+	label=_("&Remind me later"),
+	fallbackAction=True,
+	callback=remindLater
+).addHelpButton(
+	label=_("What's &new"),
+	callback=readChangelog
+)
+
+updateDialog.Show()
+```
+
+You can set many of the parameters to `addButton` later, too:
+
+* The default focus can be set by calling `setDefaultFocus` on your message dialog instance, and passing it the ID of the button to make the default focus.
+* The fallback action can be set later by calling `setFallbackAction` or `SetEscapeId` with the ID of the button which performs the fallback action.
+* The button's label can be changed by calling `setButtonLabel` with the ID of the button and the new label.
+
+#### Fallback actions
+
+The fallback action is the action performed when the dialog is closed without the user pressing one of the buttons you added to the dialog.
+This can happen for several reasons:
+
+* The user pressed `esc` or `alt+f4` to close the dialog.
+* The user used the title bar close button or system menu close item to close the dialog.
+* The user closed the dialog from the Task View, Taskbar or App Switcher.
+* The user is quitting NVDA.
+* Some other part of NVDA or an add-on has asked the dialog to close.
+
+By default, the fallback action is set to `EscapeCode.CANCEL_OR_AFFIRMATIVE`.
+This means that the fallback action will be the cancel button if there is one, the button whose ID is `dialog.GetAffirmativeId()` (`ReturnCode.OK`, by default), or `None` if no button with either ID exists in the dialog.
+You can use `dialog.SetAffirmativeId(id)` to change the ID of the button used secondarily to Cancel, if you like.
+The fallback action can also be set to `EscapeCode.NO_FALLBACK` to disable closing the dialog like this entirely.
+If it is set to any other value, the value must be the id of a button to use as the default action.
+
+In some cases, the dialog may be forced to close.
+If the dialog is shown modally, a calculated fallback action will be used if the fallback action is `EscapeCode.NO_FALLBACK` or not found.
+The order of precedence for calculating the fallback when a dialog is forced to close is as follows:
+
+1. The developer-set fallback action.
+2. The developer-set default focus.
+3. The first button added to the dialog that closes the dialog.
+4. The first button added to the dialog, regardless of whether it closes the dialog.
+5. A dummy action that does nothing but close the dialog.
+   In this case, and only this case, the return code from showing the dialog modally will be `EscapeCode.NO_FALLBACK`.
+
+#### A note on threading
+
+**IMPORTANT:** Most `MessageDialog` methods are **not** thread safe.
+Calling these methods from non-GUI threads can cause crashes or unpredictable behavior.
+
+When calling non thread safe methods on `MessageDialog` or its instances, be sure to do so on the GUI thread.
+To do this with wxPython, you can use `wx.CallAfter` or  `wx.CallLater`.
+As these operations schedule the passed callable to occur on the GUI thread, they will return immediately, and will not return the return value of the passed callable.
+If you want to wait until the callable has completed, or care about its return value, consider using `gui.guiHelper.wxCallOnMain`.
+
+The `wxCallOnMain` function executes the callable you pass to it, along with any positional and keyword arguments, on the GUI thread.
+It blocks the calling thread until the passed callable returns or raises an exception, at which point it returns the returned value, or re-raises the raised exception.
+
+```py
+# To call
+someFunction(arg1, arg2, kw1=value1, kw2=value2)
+# on the GUI thread:
+wxCallOnMain(someFunction, arg1, arg2, kw=value1, kw2=value2)
+```
+
+In fact, you cannot create, initialise, or show (modally or non-modally) `MessageDialog`s from any thread other than the GUI thread.
+
+#### Buttons
+
+You can add buttons in a number of ways:
+
+* By passing a `Collection` of `Button`s to the `buttons` keyword-only parameter to `MessageDialog` when initialising.
+* By calling `addButton` on a `MessageDialog` instance, either with a `Button` instance, or with simple parameters.
+  * When calling `addButton` with a `Button` instance, you can override all of its parameters except `id` by providing their values as keyword arguments.
+  * When calling `addButton` with simple parameters, the parameters it accepts are the same as those of `Button`.
+  * In both cases, `id` or `button` is the first argument, and is positional only.
+* By calling `addButtons` with a `Collection` of `Button`s.
+* By calling any of the add button helpers.
+
+Regardless of how you add them, you cannot add multiple buttons with the same ID to the same `MessageDialog`.
+
+A `Button` is an immutable data structure containing all of the information needed to add a button to a `MessageDialog`.
+Its fields are as follows:
+
+| Field | Type | Default | Explanation |
+| --- | --- | --- | --- |
+| `id` | `ReturnCode` | No default | The ID used to refer to the button. |
+| `label` | `str` | No default | The text label to display on the button. Prefix accelerator keys with an ampersand (&). |
+| `callback` | `Callable` or `None` | `None` | The function to call when the button is clicked. This is most useful for non-modal dialogs. |
+| `defaultFocus` | `bool` | `False` | Whether to explicitly set the button as the default focus. (1) |
+| `fallbackAction` | `bool` | `False` | Whether the button should be the fallback action, which is called when the user presses `esc`, uses the system menu or title bar close buttons, or the dialog is asked to close programmatically. (2) |
+| `closesDialog` | `bool` | `True` | Whether the button should close the dialog when pressed. (3) |
+| `returnCode` | `ReturnCode` or `None` | `None` | Value to return when a modal dialog is closed. If `None`, the button's ID will be used. |
+
+1. Setting `defaultFocus` only overrides the default focus:
+   * If no buttons have this property, the first button will be the default focus.
+   * If multiple buttons have this property, the last one will be the default focus.
+
+2. `fallbackAction` only sets whether to override the fallback action:
+   * This button will still be the fallback action if the dialog's fallback action is set to `EscapeCode.CANCEL_OR_AFFIRMATIVE` (the default) and its ID is `ReturnCode.CANCEL` (or whatever the value of `GetAffirmativeId()` is (`ReturnCode.OK`, by default), if there is no button with `id=ReturnCode.CANCEL`), even if it is added with `fallbackAction=False`.
+     To set a dialog to have no fallback action, use `setFallbackAction(EscapeCode.NO_FALLBACK)`.
+   * If multiple buttons have this property, the last one will be the fallback action.
+3. Buttons with `fallbackAction=True` and `closesDialog=False` are not supported:
+   * When adding a button with `fallbackAction=True` and `closesDialog=False`, `closesDialog` will be set to `True`.
+   * If you attempt to call `setFallbackAction` with the ID of a button that does not close the dialog, `ValueError` will be raised.
+
+A number of pre-configured buttons are available for you to use from the `DefaultButton` enumeration, complete with pre-translated labels.
+None of these buttons will explicitly set themselves as the fallback action.
+You can also add any of these buttons to an existing `MessageDialog` instance with its add button helper, which also allows you to override all but the `id` parameter.
+The following default buttons are available:
+
+| Button | Label | ID/return code | Closes dialog | Add button helper |
+| --- | --- | --- | --- | --- |
+| `APPLY` | &Apply | `ReturnCode.APPLY` | No | `addApplyButton` |
+| `CANCEL` | Cancel | `ReturnCode.CANCEL` | Yes | `addCancelButton` |
+| `CLOSE` | Close | `ReturnCode.CLOSE` | Yes | `addCloseButton` |
+| `HELP` | Help | `ReturnCode.HELP` | No | `addHelpButton` |
+| `NO` | &No | `ReturnCode.NO` | Yes | `addNoButton` |
+| `OK` | OK | `ReturnCode.OK` | Yes | `addOkButton` |
+| `SAVE` | &Save | `ReturnCode.SAVE` | Yes | `addSaveButton` |
+| `YES` | &Yes | `ReturnCode.YES` | Yes | `addYesButton` |
+
+As you usually want more than one button on a dialog, there are also a number of pre-defined sets of buttons available as members of the `DefaultButtonSet` enumeration.
+All of them comprise members of `DefaultButton`.
+You can also add any of these default button sets to an existing `MessageDialog` with one of its add buttons helpers.
+The following default button sets are available:
+
+| Button set | Contains | Add button set helper | Notes |
+| --- | --- | --- | --- |
+| `OK_CANCEL` | `DefaultButton.OK` and `DefaultButton.Cancel` | `addOkCancelButtons` | |
+| `YES_NO` | `DefaultButton.YES` and `DefaultButton.NO` | `addYesNoButtons` | You must set a fallback action if you want the user to be able to press escape to close a dialog with only these buttons. |
+| `YES_NO_CANCEL` | `DefaultButton.YES`, `DefaultButton.NO` and `DefaultButton.CANCEL` | `addYesNoCancelButtons` | |
+| `SAVE_NO_CANCEL` | `DefaultButton.SAVE`, `DefaultButton.NO`, `DefaultButton.CANCEL` | `addSaveNoCancelButtons` | The label of the no button is overridden to be "Do&n't save". |
+
+If none of the standard `ReturnCode` values are suitable for your button, you may also use `ReturnCode.CUSTOM_1` through `ReturnCode.CUSTOM_5`, which will not conflict with any built-in identifiers.
+
+#### Callbacks
+
+A convenient way of responding to button presses, especially for non-modal message dialogs, is to attach callbacks to the buttons.
+This is achieved by passing a `callback` function to `addButton`, `addButtons`, or any of the add button helpers.
+
+A callback should be a function which accepts exactly one positional argument.
+When called, a `Payload` data structure will be passed in.
+This data structure currently contains no information, though in future it may be augmented to contain information about the dialog's state and the context from which the callback was called.
+
+#### Convenience methods
+
+The `MessageDialog` class also provides a number of convenience methods for showing common types of modal dialogs.
+Each of them requires a message string, and optionally a title string and parent window.
+They all also support overriding the labels on their buttons via keyword arguments.
+They are all thread safe.
+The following convenience class methods are provided (keyword arguments for overriding button labels indicated in parentheses):
+
+| Method | Buttons | Return values |
+| --- | --- | --- |
+| `alert` | OK (`okLabel`) | `None` |
+| `confirm` | OK (`okLabel`) and Cancel (`cancelLabel`) | `ReturnCode.OK` or `ReturnCode.CANCEL` |
+| `ask` | Yes (`yesLabel`), No (`noLabel`) and Cancel (`cancelLabel`) | `ReturnCode.YES`, `ReturnCode.NO` or `ReturnCode.CANCEL` |
+
+### Displaying errors to the user: DisplayableError {#DisplayableError}
+
+`gui.message.DisplayableError` is an exception class for failures which the user should be told about via a message box, rather than only logged.
+It carries a translated message (`displayMessage`) and an optional translated title (`titleMessage`).
+If no title is given, "Error" is used.
+The error can also present itself, using its `displayError` method.
+This method safely schedules a `gui.message.messageBox` call on the GUI thread, using `wx.CallAfter`.
+
+Use `DisplayableError` when code outside the GUI layer encounters an error the user needs to know about.
+Such code might be network or data-processing code, possibly running on a background thread.
+That code should not decide how, or even whether, the error is presented.
+This keeps user-facing error presentation out of business logic, and involves three roles:
+
+* The code detecting the failure raises `DisplayableError` with a translated message.
+* A component that coordinates the work owns an instance of `DisplayableError.OnDisplayableErrorT` (an `extensionPoints.Action`), catches the exception, and notifies the action.
+Where the exception may be raised on a background thread, notify via `core.callLater` (or `wx.CallAfter`) so that handlers run on the main thread.
+* A GUI component registers a handler with that action and decides how to present the error.
+Typically the handler calls the error's `displayError` method, but it may equally decide to only log the error.
+For example, NVDA's automatic add-on update check fails silently, as the user did not initiate that work.
+
+For example, code performing a background task may raise a `DisplayableError`:
+
+```py
+from gui.message import DisplayableError
+
+def fetchWidgetData() -> WidgetData:
+	try:
+		...
+	except requests.exceptions.RequestException:
+		raise DisplayableError(
+			# Translators: Message shown when widget data cannot be fetched from the server.
+			displayMessage=_("Unable to fetch the latest widget data."),
+		)
+```
+
+The component coordinating the work owns the extension point, and notifies it on the main thread when the exception is caught:
+
+```py
+import core
+from gui.message import DisplayableError
+
+class WidgetDataUpdater:
+	onDisplayableError = DisplayableError.OnDisplayableErrorT()
+
+	def _updateInBackground(self):
+		try:
+			data = fetchWidgetData()
+		except DisplayableError as displayableError:
+			# Handlers may interact with the GUI, so ensure they are called on the main thread.
+			core.callLater(
+				delay=0,
+				callable=self.onDisplayableError.notify,
+				displayableError=displayableError,
+			)
+			return
+		...
+```
+
+Note that the keyword argument passed to `notify` must be named `displayableError`, as handlers receive it by that name.
+
+Finally, the GUI component responsible for presentation registers a handler:
+
+```py
+import gui
+from gui.message import DisplayableError
+
+class WidgetDialog(wx.Dialog):
+	def __init__(self, parent: wx.Window, updater: WidgetDataUpdater):
+		updater.onDisplayableError.register(self.handleDisplayableError)
+		...
+
+	def handleDisplayableError(self, displayableError: DisplayableError):
+		displayableError.displayError(gui.mainFrame)
+```
+
+For real-world usage, see the Add-on Store: `DisplayableError` is raised in `addonStore.install` and `addonStore.network`, routed through `gui.addonStoreGui.viewModels.store.AddonStoreVM.onDisplayableError`, and handled by `gui.addonStoreGui.controls.storeDialog.AddonStoreDialog`.

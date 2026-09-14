@@ -4,40 +4,49 @@ env:
   MILESTONE_ID: ${{ vars.MILESTONE_ID }}
 
 on:
-  issues:
-    types: [closed]
   pull_request_target:
     types: [closed]
 
 permissions:
   issues: write
   pull-requests: write
+  actions: write
 
 jobs:
   assign-milestone:
     runs-on: ubuntu-latest
     steps:
+      - name: Early exit
+        run: |
+          if [ -z "$MILESTONE_ID" ]; then
+            echo "MILESTONE_ID is not set. Exiting workflow."
+            gh run cancel ${{ github.run_id }}
+            gh run watch ${{ github.run_id }}
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+
       - name: Check if milestone is set
         id: check-milestone
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
-            const issueOrPr = context.payload.issue || context.payload.pull_request;
-            if (!issueOrPr.milestone) {
+            const pr = context.payload.pull_request;
+            if (!pr.milestone) {
               core.setOutput('milestoneNotSet', 'true');
             } else {
               core.setOutput('milestoneNotSet', 'false');
             }
 
-      - name: Check completed or merged
+      - name: Check merged
         id: check-done
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
-            if ((context.payload.issue && context.payload.issue.state_reason === "completed")
-                || (context.payload.pull_request && context.payload.pull_request.merged === true)) {
+            if (context.payload.pull_request.merged === true) {
               core.setOutput('isDone', 'true');
             } else {
               core.setOutput('isDone', 'false');
@@ -45,14 +54,14 @@ jobs:
 
       - name: Assign default milestone
         if: steps.check-milestone.outputs.milestoneNotSet == 'true' && steps.check-done.outputs.isDone == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           github-token: ${{secrets.GITHUB_TOKEN}}
           script: |
-            const issueOrPrNumber = (context.payload.issue || context.payload.pull_request).number;
+            const prNumber = context.payload.pull_request.number;
             const repository = context.repo;
             await github.rest.issues.update({
               ...repository,
-              issue_number: issueOrPrNumber,
+              issue_number: prNumber,
               milestone: process.env.MILESTONE_ID
             });

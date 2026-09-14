@@ -1,5 +1,5 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2021 NV Access Limited
+# Copyright (C) 2021-2026 NV Access Limited
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.plaintext
 
@@ -8,10 +8,9 @@ Windows Notepad with a text sample and assert NVDA interacts with it in the expe
 """
 
 # imported methods start with underscore (_) so they don't get imported into robot files as keywords
-from os.path import join as _pJoin
+from os.path import join as _pJoin  # noqa: I001
 import datetime as _datetime
 import tempfile as _tempfile
-from typing import Optional as _Optional
 from SystemTestSpy import (
 	_blockUntilConditionMet,
 	_getLib,
@@ -47,8 +46,8 @@ class NotepadLib:
 
 	# Use class variables for state that should be tied to the RF library instance.
 	# These variables will be available in the teardown
-	notepadWindow: _Optional[_Window] = None
-	processRFHandleForStart: _Optional[int] = None
+	notepadWindow: _Window | None = None
+	processRFHandleForStart: int | None = None
 
 	@staticmethod
 	def _getTestCasePath(filename):
@@ -66,7 +65,7 @@ class NotepadLib:
 			spy.emulateKeyPress("alt+f4")
 			process.wait_for_process(
 				NotepadLib.processRFHandleForStart,
-				timeout="10 seconds",
+				timeout=_datetime.timedelta(seconds=10),
 				on_timeout="continue",
 			)
 		else:
@@ -95,7 +94,7 @@ class NotepadLib:
 				expectedTitlePattern,
 				lambda message: builtIn.log(message, "DEBUG"),
 			),
-			giveUpAfterSeconds=3,
+			giveUpAfterSeconds=5,
 			shouldStopEvaluator=lambda _window: _window is not None,
 			intervalBetweenSeconds=0.5,
 			errorMessage="Unable to get notepad window",
@@ -148,13 +147,7 @@ class NotepadLib:
 		except OSError as e:
 			builtIn.log(f"Couldn't retrieve active window information.\nException: {e}")
 		raise AssertionError(
-			"Unable to focus Notepad.\n" f"{windowInformation}",
-		)
-
-	def canNotepadTitleBeReported(self, notepadTitleSpeechPattern: re.Pattern) -> bool:
-		titleSpeech = _NvdaLib.getSpeechAfterKey("NVDA+t")
-		return bool(
-			notepadTitleSpeechPattern.search(titleSpeech),
+			f"Unable to focus Notepad.\n{windowInformation}",
 		)
 
 	def prepareNotepad(self, testCase: str) -> None:
@@ -166,24 +159,29 @@ class NotepadLib:
 		@param testCase - The plaintext sample to test.
 		"""
 		spy = _NvdaLib.getSpyLib()
-		_testCaseHash = hash(testCase + _datetime.datetime.now().isoformat())
+		_testCaseHash = hash(testCase + _datetime.datetime.now().isoformat())  # noqa: DTZ005
 		uniqueTitleRegex = NotepadLib.getUniqueTestCaseTitleRegex(_testCaseHash)
 		path = self._writeTestFile(testCase, self.getUniqueTestCaseTitle(_testCaseHash))
 
 		spy.wait_for_speech_to_finish()
 		self.start_notepad(path, expectedTitlePattern=uniqueTitleRegex)
-
-		windowsLib.logForegroundWindowTitle()
-		testCaseNotepadTitleSpeech = re.compile(
-			# Unlike getUniqueTestCaseTitleRegex, this speech does not have to be at the start of the string.
-			f"{NotepadLib._testCaseTitle} \\({abs(_testCaseHash)}\\)",
-		)
-		if not self.canNotepadTitleBeReported(notepadTitleSpeechPattern=testCaseNotepadTitleSpeech):
+		try:
+			self._waitForNotepadFocus(uniqueTitleRegex)
+		except AssertionError:
+			# NVDA has waited but something prevented notepad from focusing.
+			# A window may have stolen focus or windows may have failed to focus notepad.
+			# Attempt to switch windows directly.
+			windowsLib.logForegroundWindowTitle()
+			testCaseNotepadTitleSpeech = re.compile(
+				# Unlike getUniqueTestCaseTitleRegex, this speech does not have to be at the start of the string.
+				f"{NotepadLib._testCaseTitle} \\({abs(_testCaseHash)}\\)",
+			)
 			builtIn.log("Trying to switch to notepad Window")
 			windowsLib.taskSwitchToItemMatching(targetWindowNamePattern=testCaseNotepadTitleSpeech)
 			windowsLib.logForegroundWindowTitle()
 
-		self._waitForNotepadFocus(uniqueTitleRegex)
-		windowsLib.logForegroundWindowTitle()
+			self._waitForNotepadFocus(uniqueTitleRegex)
+		finally:
+			windowsLib.logForegroundWindowTitle()
 		# Move to the start of file
-		_NvdaLib.getSpeechAfterKey("home")
+		_NvdaLib.getSpeechAfterKey("control+home")

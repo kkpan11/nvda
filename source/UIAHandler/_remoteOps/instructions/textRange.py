@@ -7,7 +7,7 @@
 This module contains the instructions that operate on UI Automation text ranges.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 from typing import cast
 from dataclasses import dataclass
 from UIAHandler import UIA
@@ -97,7 +97,7 @@ class TextRangeFindAttribute(_TypedInstruction):
 	def localExecute(self, registers: dict[lowLevel.OperandId, object]):
 		textRange = cast(UIA.IUIAutomationTextRange, registers[self.target.operandId])
 		attributeId = cast(int, registers[self.attributeId.operandId])
-		value = cast(object, registers[self.value.operandId])
+		value = registers[self.value.operandId]
 		reverse = cast(bool, registers[self.reverse.operandId])
 		registers[self.result.operandId] = textRange.FindAttribute(attributeId, value, reverse)
 

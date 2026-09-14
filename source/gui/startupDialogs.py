@@ -1,23 +1,22 @@
-# -*- coding: UTF-8 -*-
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2023 NV Access Limited, Łukasz Golonka, Cyrille Bougot
+# Copyright (C) 2006-2025 NV Access Limited, Łukasz Golonka, Cyrille Bougot
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
-from typing import Set
-import weakref
+import weakref  # noqa: I001
 import wx
 
 import config
 from config.configFlags import NVDAKey
 import core
-from documentationUtils import getDocFilePath
+from documentationUtils import displayLicense
 import globalVars
 import gui
 from gui.dpiScalingHelper import DpiScalingHelperMixinWithoutInit
+import gui.guiHelper
 import keyboardHandler
 from logHandler import log
-import versionInfo
+import buildVersion
 
 
 class WelcomeDialog(
@@ -41,7 +40,7 @@ class WelcomeDialog(
 		"Press NVDA+n at any time to activate the NVDA menu.\n"
 		"From this menu, you can configure NVDA, get help, and access other NVDA functions.",
 	)
-	_instances: Set["WelcomeDialog"] = weakref.WeakSet()
+	_instances: set["WelcomeDialog"] = weakref.WeakSet()
 
 	def __init__(self, parent):
 		# Translators: The title of the Welcome dialog when user starts NVDA for the first time.
@@ -74,7 +73,7 @@ class WelcomeDialog(
 			index = self.kbdNames.index(config.conf["keyboard"]["keyboardLayout"])
 			self.kbdList.SetSelection(index)
 		except (ValueError, KeyError):
-			log.error("Could not set Keyboard layout list to current layout", exc_info=True)
+			log.error("Could not set Keyboard layout list to current layout", exc_info=True)  # noqa: G201
 		# Translators: The label of a checkbox in the Welcome dialog.
 		capsAsNVDAModifierText = _("&Use CapsLock as an NVDA modifier key")
 		self.capsAsNVDAModifierCheckBox = sHelper.addItem(
@@ -137,7 +136,7 @@ class WelcomeDialog(
 		)
 		try:
 			config.conf.save()
-		except Exception:
+		except Exception:  # noqa: BLE001
 			log.debugWarning("Could not save", exc_info=True)
 		self.EndModal(wx.ID_OK)
 		self.Close()
@@ -173,22 +172,16 @@ class LauncherDialog(
 
 	helpId = "InstallingNVDA"
 
-	def __init__(self, parent):
+	def __init__(self, parent: wx.Window | None):
 		super().__init__(
 			parent,
-			title=f"{versionInfo.name} {_('Launcher')}",
+			title=f"{buildVersion.name} {_('Launcher')}",
 		)
 
 		mainSizer = wx.BoxSizer(wx.VERTICAL)
 		sHelper = gui.guiHelper.BoxSizerHelper(self, orientation=wx.VERTICAL)
 
 		sHelper.addItem(self._createLicenseAgreementGroup())
-
-		# Translators: The label for a checkbox in NvDA installation program to agree to the license agreement.
-		agreeText = _("I &agree")
-		self.licenseAgreeCheckbox = sHelper.addItem(wx.CheckBox(self, label=agreeText))
-		self.licenseAgreeCheckbox.Value = False
-		self.licenseAgreeCheckbox.Bind(wx.EVT_CHECKBOX, self.onLicenseAgree)
 
 		sizer = sHelper.addItem(wx.GridSizer(2, 2, 0, 0))
 		self.actionButtons = []
@@ -225,24 +218,19 @@ class LauncherDialog(
 		# Translators: The label of the license text which will be shown when NVDA installation program starts.
 		groupLabel = _("License Agreement")
 		sizer = wx.StaticBoxSizer(wx.VERTICAL, self, label=groupLabel)
-		# Create a fake text control to determine appropriate width of license text box
-		_fakeTextCtrl = wx.StaticText(
-			self,
-			label="a" * 80,  # The GPL2 text of copying.txt wraps sentences at 80 characters
-		)
-		widthOfLicenseText = _fakeTextCtrl.Size[0]
-		_fakeTextCtrl.Destroy()
-		licenseTextCtrl = wx.TextCtrl(
-			self,
-			size=(widthOfLicenseText, self.scaleSize(300)),
-			style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH,
-		)
-		licenseTextCtrl.Value = open(getDocFilePath("copying.txt", False), "r", encoding="UTF-8").read()
-		sizer.Add(
-			licenseTextCtrl,
-			flag=wx.EXPAND,
-			proportion=1,
-		)
+
+		# Translators: The label of a button in NVDA installation process to view the license agreement.
+		viewLicenseButton = wx.Button(self, label=_("&View License"))
+		viewLicenseButton.Bind(wx.EVT_BUTTON, lambda evt: displayLicense())
+		sizer.Add(viewLicenseButton, border=gui.guiHelper.SPACE_BETWEEN_BUTTONS_VERTICAL)
+
+		# Translators: The label for a checkbox in NVDA installation process to agree to the license agreement.
+		agreeText = _("I have read and &agree to the license agreement")
+		self.licenseAgreeCheckbox = wx.CheckBox(self, label=agreeText)
+		self.licenseAgreeCheckbox.SetValue(False)
+		self.licenseAgreeCheckbox.Bind(wx.EVT_CHECKBOX, self.onLicenseAgree)
+		sizer.Add(self.licenseAgreeCheckbox, border=gui.guiHelper.SPACE_BETWEEN_ASSOCIATED_CONTROL_VERTICAL)
+
 		return sizer
 
 	def onLicenseAgree(self, evt):

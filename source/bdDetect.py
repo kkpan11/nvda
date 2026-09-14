@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2013-2023 NV Access Limited, Babbage B.V., Leonard de Ruijter
+# Copyright (C) 2013-2025 NV Access Limited, Babbage B.V., Leonard de Ruijter, Christian Comaschi
 
 """Support for braille display detection.
 This allows devices to be automatically detected and used when they become available,
@@ -12,27 +12,23 @@ Drivers distributed with NVDA do this at the bottom of this module.
 For drivers in add-ons, this must be done in a global plugin.
 """
 
+from dataclasses import dataclass, field  # noqa: I001
+from functools import partial
 import itertools
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from enum import StrEnum
 from typing import (
 	Any,
-	Callable,
-	Dict,
-	Generator,
-	Iterable,
-	Iterator,
-	List,
 	NamedTuple,
-	Optional,
-	OrderedDict,
-	Tuple,
-	Type,
 )
+from collections import OrderedDict
+from collections.abc import Callable, Generator, Iterable, Iterator
 import hwPortUtils
 import NVDAState
 import braille
+import braille.display
+import braille.display.driver
 import winUser
 import config
 import appModuleHandler
@@ -48,18 +44,47 @@ HID_USAGE_PAGE_BRAILLE = 0x41
 
 DBT_DEVNODES_CHANGED = 7
 
-USB_ID_REGEX = re.compile(r"^VID_[0-9A-F]{4}&PID_[0-9A-F]{4}$", re.U)
+USB_ID_REGEX = re.compile(r"^VID_[0-9A-F]{4}&PID_[0-9A-F]{4}$", re.UNICODE)
 
 
-class DeviceType(StrEnum):
+class ProtocolType(StrEnum):
 	HID = "hid"
 	"""HID devices"""
 	SERIAL = "serial"
 	"""Serial devices (COM ports)"""
 	CUSTOM = "custom"
-	"""Devices with a manufacturer specific driver"""
+	"""Devices with a manufacturer specific protocol"""
+
+
+class CommunicationType(StrEnum):
 	BLUETOOTH = "bluetooth"
 	"""Bluetooth devices"""
+	USB = "usb"
+	"""USB devices"""
+
+
+class _DeviceTypeMeta(type):
+	# Mapping old attributes to the new enums
+	_mapping = {  # noqa: RUF012
+		"HID": ProtocolType.HID,
+		"SERIAL": ProtocolType.SERIAL,
+		"CUSTOM": ProtocolType.CUSTOM,
+		"BLUETOOTH": CommunicationType.BLUETOOTH,
+	}
+
+	def __getattr__(cls, name: str) -> ProtocolType | CommunicationType:
+		repl = cls._mapping.get(name)
+		if repl is not None and NVDAState._allowDeprecatedAPI():
+			log.warning(
+				f"{cls.__name__}.{name} is deprecated. Use {repl.__class__.__name__}.{repl} instead.",
+			)
+			return repl
+		raise AttributeError(f"'{cls.__name__}' object has no attribute '{name}'")
+
+
+class DeviceType(metaclass=_DeviceTypeMeta):
+	"""This class is kept for backwards compatibility.
+	Former members were split into the L{ProtocolType} and L{CommunicationType} enums."""
 
 
 def __getattr__(attrName: str) -> Any:
@@ -71,45 +96,73 @@ def __getattr__(attrName: str) -> Any:
 		log.warning(f"{attrName} is deprecated.")
 		return 2
 	_deprecatedConstantsMap = {
-		"KEY_HID": DeviceType.HID,
-		"KEY_SERIAL": DeviceType.SERIAL,
-		"KEY_BLUETOOTH": DeviceType.BLUETOOTH,
-		"KEY_CUSTOM": DeviceType.CUSTOM,
+		"KEY_HID": ProtocolType.HID,
+		"KEY_SERIAL": ProtocolType.SERIAL,
+		"KEY_BLUETOOTH": CommunicationType.BLUETOOTH,
+		"KEY_CUSTOM": ProtocolType.CUSTOM,
 	}
 	if attrName in _deprecatedConstantsMap and NVDAState._allowDeprecatedAPI():
 		replacementSymbol = _deprecatedConstantsMap[attrName]
 		log.warning(
-			f"{attrName} is deprecated. " f"Use bdDetect.DeviceType.{replacementSymbol.name} instead. ",
+			f"{attrName} is deprecated. "
+			f"Use bdDetect.{replacementSymbol.__class__.__name__}.{replacementSymbol.value} instead. ",
 		)
-		return replacementSymbol
-	raise AttributeError(f"module {repr(__name__)} has no attribute {repr(attrName)}")
+		return replacementSymbol.value
+	raise AttributeError(f"module {__name__!r} has no attribute {attrName!r}")
 
 
 class DeviceMatch(NamedTuple):
 	"""Represents a detected device."""
 
-	type: DeviceType
-	"""The type of the device."""
+	type: ProtocolType
+	"""The protocol type of the device."""
 	id: str
 	"""The identifier of the device."""
 	port: str
 	"""The port that can be used by a driver to communicate with a device."""
-	deviceInfo: Dict[str, str]
+	deviceInfo: dict[str, str]
 	"""All known information about a device."""
 
 
-MatchFuncT = Callable[[DeviceMatch], bool]
-DriverDictT = defaultdict[DeviceType, set[str] | MatchFuncT]
+type MatchFuncT = Callable[[DeviceMatch], bool]
 
+
+@dataclass(frozen=True)
+class _UsbDeviceRegistryEntry:
+	"""An internal class that contains information specific to an USB device registration."""
+
+	id: str
+	"""The identifier of the device."""
+	type: ProtocolType
+	"""The protocol type of the device."""
+	useAsFallback: bool = field(default=False, compare=False)
+	"""
+	determine how a device is associated with a driver.
+	If False (default), the device is immediately available for use with the driver.
+	If True, the device is added to a fallback list and is used only if the primary driver cannot use
+	initial devices, serving as a backup option in case of compatibility issues.
+	This provides flexibility and robustness in managing driver-device connections.
+	"""
+	matchFunc: MatchFuncT | None = field(default=None, compare=False)
+	"""
+	An optional function which determines whether a given device matches.
+	It takes a L{DeviceMatch} as its only argument
+	and returns a C{bool} indicating whether it matched."""
+
+	def matches(self, deviceMatch: DeviceMatch) -> bool:
+		"""Returns whether this registry entry matches a specific device."""
+		if deviceMatch.type != self.type or deviceMatch.id != self.id:
+			return False
+		if self.matchFunc is None:
+			return True
+		return self.matchFunc(deviceMatch)
+
+
+DriverDictT = defaultdict[CommunicationType, set[_UsbDeviceRegistryEntry] | MatchFuncT]
 _driverDevices = OrderedDict[str, DriverDictT]()
+type DriverAndDeviceMatch = tuple[str, DeviceMatch]
 
-fallBackDevices: set[tuple[str, DeviceType, str]] = set()
-"""
-Used to store fallback devices.
-When registered as a fallback device, it will be yielded last among the connected USB devices.
-"""
-
-scanForDevices = extensionPoints.Chain[Tuple[str, DeviceMatch]]()
+scanForDevices = extensionPoints.Chain[DriverAndDeviceMatch]()
 """
 A Chain that can be iterated to scan for devices.
 Registered handlers should yield a tuple containing a driver name as str and DeviceMatch
@@ -119,31 +172,33 @@ Handlers are called with these keyword arguments:
 @param bluetooth: Whether the handler is expected to yield USB devices.
 @type bluetooth: bool
 @param limitToDevices: Drivers to which detection should be limited.
-	C{None} if no driver filtering should occur.
+	``None`` if no driver filtering should occur.
 @type limitToDevices: Optional[List[str]]
 """
 
 
-def _isDebug():
-	return config.conf["debugLog"]["hwIo"]
+def _isDebug() -> bool:
+	return config.conf["debugLog"]["bdDetect"]
 
 
 def getDriversForConnectedUsbDevices(
-	limitToDevices: Optional[List[str]] = None,
-) -> Iterator[Tuple[str, DeviceMatch]]:
+	limitToDevices: list[str] | None = None,
+) -> Iterator[DriverAndDeviceMatch]:
 	"""Get any matching drivers for connected USB devices.
 	Looks for (and yields) custom drivers first, then considers if the device is may be compatible with the
 	Standard HID Braille spec.
-	@param limitToDevices: Drivers to which detection should be limited.
-		C{None} if no driver filtering should occur.
-	@return: Generator of pairs of drivers and device information.
+	:param limitToDevices: Drivers to which detection should be limited.
+		``None`` if no driver filtering should occur.
+	:return: Generator of pairs of drivers and device information.
 	"""
+	if limitToDevices and _isDebug():
+		log.debug("Limiting connected USB device detection to drivers: %r", limitToDevices)
 	usbCustomDeviceMatches = (
-		DeviceMatch(DeviceType.CUSTOM, port["usbID"], port["devicePath"], port)
+		DeviceMatch(ProtocolType.CUSTOM, port["usbID"], port["devicePath"], port)
 		for port in deviceInfoFetcher.usbDevices
 	)
 	usbComDeviceMatches = (
-		DeviceMatch(DeviceType.SERIAL, port["usbID"], port["port"], port)
+		DeviceMatch(ProtocolType.SERIAL, port["usbID"], port["port"], port)
 		for port in deviceInfoFetcher.usbComPorts
 	)
 	# Tee is used to ensure that the DeviceMatches aren't created multiple times.
@@ -152,24 +207,27 @@ def getDriversForConnectedUsbDevices(
 	# The corollary is that clients of this method don't have to process all devices (and create all
 	# device matches), if one is found early the iteration can stop.
 	usbHidDeviceMatches, usbHidDeviceMatchesForCustom = itertools.tee(
-		(
-			DeviceMatch(DeviceType.HID, port["usbID"], port["devicePath"], port)
-			for port in deviceInfoFetcher.hidDevices
-			if port["provider"] == "usb"
-		)
+		DeviceMatch(ProtocolType.HID, port["usbID"], port["devicePath"], port)
+		for port in deviceInfoFetcher.hidDevices
+		if port["provider"] == CommunicationType.USB
 	)
 
-	fallbackDriversAndMatches: list[set[str, DeviceMatch]] = []
+	fallbackDriversAndMatches: list[DriverAndDeviceMatch] = []
 	for match in itertools.chain(usbCustomDeviceMatches, usbHidDeviceMatchesForCustom, usbComDeviceMatches):
 		for driver, devs in _driverDevices.items():
 			if limitToDevices and driver not in limitToDevices:
+				if _isDebug():
+					log.debug("Skipping excluded driver %r for USB device match: %r", driver, match)
 				continue
-			for type, ids in devs.items():
-				if match.type == type and match.id in ids:
-					if (driver, match.type, match.id) in fallBackDevices:
-						fallbackDriversAndMatches.append({driver, match})
+			usbDefinitions = devs[CommunicationType.USB]
+			for definition in usbDefinitions:
+				if definition.matches(match):
+					if definition.useAsFallback:
+						if _isDebug():
+							log.debug("Using USB device match %r as fallback for driver %r", match, driver)
+						fallbackDriversAndMatches.append((driver, match))
 					else:
-						yield driver, match
+						yield (driver, match)
 
 	hidName = _getStandardHidDriverName()
 	if limitToDevices and hidName not in limitToDevices:
@@ -179,13 +237,10 @@ def getDriversForConnectedUsbDevices(
 		# This ensures that a vendor specific driver is preferred over the braille HID protocol.
 		# This preference may change in the future.
 		if _isHIDBrailleMatch(match):
-			if (driver, match.type, match.id) in fallBackDevices:
-				fallbackDriversAndMatches.append({hidName, match})
-			else:
-				yield hidName, match
+			yield (hidName, match)
 
 	for driver, match in fallbackDriversAndMatches:
-		yield driver, match
+		yield (driver, match)
 
 
 def _getStandardHidDriverName() -> str:
@@ -195,22 +250,37 @@ def _getStandardHidDriverName() -> str:
 	return brailleDisplayDrivers.hidBrailleStandard.HidBrailleDriver.name
 
 
+def _isHIDUsagePageMatch(match: DeviceMatch, usagePage: int) -> bool:
+	return match.type == ProtocolType.HID and match.deviceInfo.get("HIDUsagePage") == usagePage
+
+
 def _isHIDBrailleMatch(match: DeviceMatch) -> bool:
-	return match.type == DeviceType.HID and match.deviceInfo.get("HIDUsagePage") == HID_USAGE_PAGE_BRAILLE
+	return _isHIDUsagePageMatch(match, HID_USAGE_PAGE_BRAILLE)
+
+
+def HIDUsagePageMatchFuncFactory(usagePage: int) -> MatchFuncT:
+	"""
+	Creates a match function that checks if a given HID usage page matches the specified usage page.
+	:param usagePage: The HID usage page to match against.
+	:returns: A partial function that takes an HID usage page and returns True if it matches the specified usage page, False otherwise.
+	"""
+	return partial(_isHIDUsagePageMatch, usagePage=usagePage)
 
 
 def getDriversForPossibleBluetoothDevices(
-	limitToDevices: Optional[List[str]] = None,
-) -> Iterator[Tuple[str, DeviceMatch]]:
+	limitToDevices: list[str] | None = None,
+) -> Iterator[DriverAndDeviceMatch]:
 	"""Get any matching drivers for possible Bluetooth devices.
 	Looks for (and yields) custom drivers first, then considers if the device is may be compatible with the
 	Standard HID Braille spec.
-	@param limitToDevices: Drivers to which detection should be limited.
-		C{None} if no driver filtering should occur.
-	@return: Generator of pairs of drivers and port information.
+	:param limitToDevices: Drivers to which detection should be limited.
+		``None`` if no driver filtering should occur.
+	:return: Generator of pairs of drivers and port information.
 	"""
+	if limitToDevices and _isDebug():
+		log.debug("Limiting possible Bluetooth device detection to drivers: %r", limitToDevices)
 	btSerialMatchesForCustom = (
-		DeviceMatch(DeviceType.SERIAL, port["bluetoothName"], port["port"], port)
+		DeviceMatch(ProtocolType.SERIAL, port["bluetoothName"], port["port"], port)
 		for port in deviceInfoFetcher.comPorts
 		if "bluetoothName" in port
 	)
@@ -220,21 +290,25 @@ def getDriversForPossibleBluetoothDevices(
 	# The corollary is that clients of this method don't have to process all devices (and create all
 	# device matches), if one is found early the iteration can stop.
 	btHidDevMatchesForHid, btHidDevMatchesForCustom = itertools.tee(
-		(
-			DeviceMatch(DeviceType.HID, port["hardwareID"], port["devicePath"], port)
-			for port in deviceInfoFetcher.hidDevices
-			if port["provider"] == "bluetooth"
-		)
+		DeviceMatch(ProtocolType.HID, port["hardwareID"], port["devicePath"], port)
+		for port in deviceInfoFetcher.hidDevices
+		if port["provider"] == CommunicationType.BLUETOOTH
 	)
 	for match in itertools.chain(btSerialMatchesForCustom, btHidDevMatchesForCustom):
 		for driver, devs in _driverDevices.items():
 			if limitToDevices and driver not in limitToDevices:
 				continue
-			matchFunc = devs[DeviceType.BLUETOOTH]
+			matchFunc = devs[CommunicationType.BLUETOOTH]
 			if not callable(matchFunc):
+				if _isDebug():
+					log.debugWarning(
+						"Skipping non-callable matchFunc %r for Bluetooth device match: %r",
+						matchFunc,
+						match,
+					)
 				continue
 			if matchFunc(match):
-				yield driver, match
+				yield (driver, match)
 
 	hidName = _getStandardHidDriverName()
 	if limitToDevices and hidName not in limitToDevices:
@@ -247,7 +321,7 @@ def getDriversForPossibleBluetoothDevices(
 			yield (hidName, match)
 
 
-btDevsCacheT = Optional[List[Tuple[str, DeviceMatch]]]
+type btDevsCacheT = list[DriverAndDeviceMatch] | None  # noqa: PYI042
 
 
 class _DeviceInfoFetcher(AutoPropertyObject):
@@ -264,6 +338,8 @@ class _DeviceInfoFetcher(AutoPropertyObject):
 
 	def _get_btDevsCache(self) -> btDevsCacheT:
 		with self._btDevsLock:
+			if _isDebug():
+				log.debug("Fetching Bluetooth device cache")
 			return self._btDevsCache.copy() if self._btDevsCache else None
 
 	def _set_btDevsCache(
@@ -271,6 +347,8 @@ class _DeviceInfoFetcher(AutoPropertyObject):
 		cache: btDevsCacheT,
 	):
 		with self._btDevsLock:
+			if _isDebug():
+				log.debug("Setting Bluetooth device cache")
 			self._btDevsCache = cache.copy() if cache else None
 
 	#: Type info for auto property: _get_comPorts
@@ -280,9 +358,9 @@ class _DeviceInfoFetcher(AutoPropertyObject):
 		return list(hwPortUtils.listComPorts(onlyAvailable=True))
 
 	#: Type info for auto property: _get_usbDevices
-	usbDevices: List[Dict]
+	usbDevices: list[dict]
 
-	def _get_usbDevices(self) -> List[Dict]:
+	def _get_usbDevices(self) -> list[dict]:
 		return list(hwPortUtils.listUsbDevices(onlyAvailable=True))
 
 	#: Type info for auto property: _get_usbComPorts
@@ -303,13 +381,13 @@ class _DeviceInfoFetcher(AutoPropertyObject):
 		return comPorts
 
 	#: Type info for auto property: _get_hidDevices
-	hidDevices: List[Dict]
+	hidDevices: list[dict]
 
-	def _get_hidDevices(self) -> List[Dict]:
+	def _get_hidDevices(self) -> list[dict]:
 		return list(hwPortUtils.listHidDevices(onlyAvailable=True))
 
 
-deviceInfoFetcher: Optional[_DeviceInfoFetcher] = None
+deviceInfoFetcher: _DeviceInfoFetcher | None = None
 
 
 class _Detector:
@@ -322,72 +400,100 @@ class _Detector:
 		After construction, a scan should be queued with L{queueBgScan}.
 		"""
 		self._executor = ThreadPoolExecutor(1)
-		self._queuedFuture: Optional[Future] = None
+		self._queuedFuture: Future | None = None
 		messageWindow.pre_handleWindowMessage.register(self.handleWindowMessage)
 		appModuleHandler.post_appSwitch.register(self.pollBluetoothDevices)
 		self._stopEvent = threading.Event()
 		self._detectUsb = True
 		self._detectBluetooth = True
-		self._limitToDevices: Optional[List[str]] = None
+		self._limitToDevices: list[str] | None = None
 
 	def _queueBgScan(
 		self,
 		usb: bool = False,
 		bluetooth: bool = False,
-		limitToDevices: Optional[List[str]] = None,
+		limitToDevices: list[str] | None = None,
+		preferredDevice: DriverAndDeviceMatch | None = None,
 	):
 		"""Queues a scan for devices.
 		If a scan is already in progress, a new scan will be queued after the current scan.
 		To explicitely cancel a scan in progress, use L{rescan}.
-		@param usb: Whether USB devices should be detected for this and subsequent scans.
-		@param bluetooth: Whether Bluetooth devices should be detected for this and subsequent scans.
-		@param limitToDevices: Drivers to which detection should be limited for this and subsequent scans.
-			C{None} if default driver filtering according to config should occur.
+		:param usb: Whether USB devices should be detected for this and subsequent scans.
+		:param bluetooth: Whether Bluetooth devices should be detected for this and subsequent scans.
+		:param limitToDevices: Drivers to which detection should be limited for this and subsequent scans.
+			``None`` if default driver filtering according to config should occur.
+		:param preferredDevice: An optional preferred device to use for detection before scanning.
+			``None`` if no preferred device should be used.
 		"""
+		if _isDebug():
+			log.debug(
+				"Queuing background scan: usb=%r, bluetooth=%r, limitToDevices=%r, preferredDevice=%r",
+				usb,
+				bluetooth,
+				limitToDevices,
+				preferredDevice,
+			)
+
 		self._detectUsb = usb
 		self._detectBluetooth = bluetooth
 		if limitToDevices is None and config.conf["braille"]["auto"]["excludedDisplays"]:
 			limitToDevices = list(getBrailleDisplayDriversEnabledForDetection())
+			if limitToDevices and _isDebug():
+				log.debug(
+					"Limiting device detection to drivers enabled for auto detection: %r",
+					limitToDevices,
+				)
 		self._limitToDevices = limitToDevices
 
 		if self._queuedFuture:
 			# This will cancel a queued scan (i.e. not the currently running scan, if any)
 			# If this future belongs to a scan that is currently running or finished, this does nothing.
+			if _isDebug():
+				log.debug("Cancelling queued future for next background scan")
 			self._queuedFuture.cancel()
-		self._queuedFuture = self._executor.submit(self._bgScan, usb, bluetooth, limitToDevices)
+		self._queuedFuture = self._executor.submit(
+			self._bgScan,
+			usb,
+			bluetooth,
+			limitToDevices,
+			preferredDevice,
+		)
 
 	def _stopBgScan(self):
 		"""Stops the current scan as soon as possible and prevents a queued scan to start."""
+		if _isDebug():
+			log.debug("Stopping background scan")
 		self._stopEvent.set()
 		if self._queuedFuture:
 			# This will cancel a queued scan (i.e. not the currently running scan, if any)
 			# If this future belongs to a scan that is currently running or finished, this does nothing.
+			if _isDebug():
+				log.debug("Cancelling queued future for next background scan")
 			self._queuedFuture.cancel()
 
 	@staticmethod
 	def _bgScanUsb(
 		usb: bool = True,
-		limitToDevices: Optional[List[str]] = None,
+		limitToDevices: list[str] | None = None,
 	):
 		"""Handler for L{scanForDevices} that yields USB devices.
 		See the L{scanForDevices} documentation for information about the parameters.
 		"""
 		if not usb:
 			return
-		for driver, match in getDriversForConnectedUsbDevices(limitToDevices):
-			yield (driver, match)
+		yield from getDriversForConnectedUsbDevices(limitToDevices)
 
 	@staticmethod
 	def _bgScanBluetooth(
 		bluetooth: bool = True,
-		limitToDevices: Optional[List[str]] = None,
+		limitToDevices: list[str] | None = None,
 	):
 		"""Handler for L{scanForDevices} that yields Bluetooth devices and keeps an internal cache of devices.
 		See the L{scanForDevices} documentation for information about the parameters.
 		"""
 		if not bluetooth:
 			return
-		btDevs: Optional[Iterable[Tuple[str, DeviceMatch]]] = deviceInfoFetcher.btDevsCache
+		btDevs: Iterable[DriverAndDeviceMatch] | None = deviceInfoFetcher.btDevsCache
 		if btDevs is None:
 			btDevs = getDriversForPossibleBluetoothDevices(limitToDevices)
 			# Cache Bluetooth devices for next time.
@@ -405,18 +511,42 @@ class _Detector:
 		self,
 		usb: bool,
 		bluetooth: bool,
-		limitToDevices: Optional[List[str]],
+		limitToDevices: list[str] | None,
+		preferredDevice: DriverAndDeviceMatch | None,
 	):
 		"""Performs the actual background scan.
 		this function should be run on a background thread.
-		@param usb: Whether USB devices should be detected for this particular scan.
-		@param bluetooth: Whether Bluetooth devices should be detected for this particular scan.
-		@param limitToDevices: Drivers to which detection should be limited for this scan.
-			C{None} if no driver filtering should occur.
+		:param usb: Whether USB devices should be detected for this particular scan.
+		:param bluetooth: Whether Bluetooth devices should be detected for this particular scan.
+		:param limitToDevices: Drivers to which detection should be limited for this scan.
+			``None`` if no driver filtering should occur.
+		:param preferredDevice: An optional preferred device to use for detection before scanning.
+			``None`` if no preferred device should be used.
 		"""
+		if _isDebug():
+			log.debug(
+				"Starting background scan: usb=%r, bluetooth=%r, limitToDevices=%r, preferredDevice=%r",
+				usb,
+				bluetooth,
+				limitToDevices,
+				preferredDevice,
+			)
 		# Clear the stop event before a scan is started.
 		# Since a scan can take some time to complete, another thread can set the stop event to cancel it.
 		self._stopEvent.clear()
+		if preferredDevice:
+			if _isDebug():
+				log.debug("Trying preferred device first: %r", preferredDevice)
+			if braille.handler.setDisplayByName(preferredDevice[0], detected=preferredDevice[1]):
+				if _isDebug():
+					log.debug("Switched to preferred device: %r", preferredDevice[0])
+				return
+			elif _isDebug():
+				log.debug("Failed to switch to preferred device, continuing scan: %r", preferredDevice)
+
+		if self._stopEvent.is_set():
+			return
+
 		iterator = scanForDevices.iter(
 			usb=usb,
 			bluetooth=bluetooth,
@@ -425,8 +555,14 @@ class _Detector:
 		for driver, match in iterator:
 			if self._stopEvent.is_set():
 				return
+			if _isDebug():
+				log.debug("Processing driver %r, match %r", driver, match)
 			if braille.handler.setDisplayByName(driver, detected=match):
+				if _isDebug():
+					log.debug("Switched to driver %r, match %r", driver, match)
 				return
+			elif _isDebug():
+				log.debug("Failed to switch to driver %r, match %r. Continuing", driver, match)
 			if self._stopEvent.is_set():
 				return
 
@@ -434,20 +570,26 @@ class _Detector:
 		self,
 		usb: bool = True,
 		bluetooth: bool = True,
-		limitToDevices: Optional[List[str]] = None,
+		limitToDevices: list[str] | None = None,
+		preferredDevice: DriverAndDeviceMatch | None = None,
 	):
 		"""Stop a current scan when in progress, and start scanning from scratch.
-		@param usb: Whether USB devices should be detected for this and subsequent scans.
-		@type usb: bool
-		@param bluetooth: Whether Bluetooth devices should be detected for this and subsequent scans.
-		@type bluetooth: bool
-		@param limitToDevices: Drivers to which detection should be limited for this and subsequent scans.
-			C{None} if default driver filtering according to config should occur.
+		:param usb: Whether USB devices should be detected for this and subsequent scans.
+		:param bluetooth: Whether Bluetooth devices should be detected for this and subsequent scans.
+		:param limitToDevices: Drivers to which detection should be limited for this and subsequent scans.
+			``None`` if default driver filtering according to config should occur.
+		:param preferredDevice: An optional preferred device to use for detection before scanning.
+			``None`` if no preferred device should be used.
 		"""
 		self._stopBgScan()
 		# Clear the cache of bluetooth devices so new devices can be picked up.
 		deviceInfoFetcher.btDevsCache = None
-		self._queueBgScan(usb=usb, bluetooth=bluetooth, limitToDevices=limitToDevices)
+		self._queueBgScan(
+			usb=usb,
+			bluetooth=bluetooth,
+			limitToDevices=limitToDevices,
+			preferredDevice=preferredDevice,
+		)
 
 	def handleWindowMessage(self, msg=None, wParam=None):
 		if msg == winUser.WM_DEVICECHANGE and wParam == DBT_DEVNODES_CHANGED:
@@ -467,8 +609,6 @@ class _Detector:
 		appModuleHandler.post_appSwitch.unregister(self.pollBluetoothDevices)
 		messageWindow.pre_handleWindowMessage.unregister(self.handleWindowMessage)
 		self._stopBgScan()
-		# Clear the fallback devices
-		fallBackDevices.clear()
 		# Clear the cache of bluetooth devices so new devices can be picked up with a new instance.
 		deviceInfoFetcher.btDevsCache = None
 		self._executor.shutdown(wait=False)
@@ -482,16 +622,16 @@ def getConnectedUsbDevicesForDriver(driver: str) -> Iterator[DeviceMatch]:
 	"""
 	usbDevs = itertools.chain(
 		(
-			DeviceMatch(DeviceType.CUSTOM, port["usbID"], port["devicePath"], port)
+			DeviceMatch(ProtocolType.CUSTOM, port["usbID"], port["devicePath"], port)
 			for port in deviceInfoFetcher.usbDevices
 		),
 		(
-			DeviceMatch(DeviceType.HID, port["usbID"], port["devicePath"], port)
+			DeviceMatch(ProtocolType.HID, port["usbID"], port["devicePath"], port)
 			for port in deviceInfoFetcher.hidDevices
-			if port["provider"] == "usb"
+			if port["provider"] == CommunicationType.USB
 		),
 		(
-			DeviceMatch(DeviceType.SERIAL, port["usbID"], port["port"], port)
+			DeviceMatch(ProtocolType.SERIAL, port["usbID"], port["port"], port)
 			for port in deviceInfoFetcher.usbComPorts
 		),
 	)
@@ -501,15 +641,12 @@ def getConnectedUsbDevicesForDriver(driver: str) -> Iterator[DeviceMatch]:
 	for match in usbDevs:
 		if driver == _getStandardHidDriverName():
 			if _isHIDBrailleMatch(match):
-				if (driver, match.type, match.id) in fallBackDevices:
-					fallbackMatches.append(match)
-				else:
-					yield match
+				yield match
 		else:
-			devs = _driverDevices[driver]
-			for type, ids in devs.items():
-				if match.type == type and match.id in ids:
-					if (driver, match.type, match.id) in fallBackDevices:
+			usbDefinitions = _driverDevices[driver][CommunicationType.USB]
+			for definition in usbDefinitions:
+				if definition.matches(match):
+					if definition.useAsFallback:
 						fallbackMatches.append(match)
 					else:
 						yield match
@@ -527,19 +664,19 @@ def getPossibleBluetoothDevicesForDriver(driver: str) -> Iterator[DeviceMatch]:
 	if driver == _getStandardHidDriverName():
 		matchFunc = _isHIDBrailleMatch
 	else:
-		matchFunc = _driverDevices[driver][DeviceType.BLUETOOTH]
+		matchFunc = _driverDevices[driver][CommunicationType.BLUETOOTH]
 		if not callable(matchFunc):
 			return
 	btDevs = itertools.chain(
 		(
-			DeviceMatch(DeviceType.SERIAL, port["bluetoothName"], port["port"], port)
+			DeviceMatch(ProtocolType.SERIAL, port["bluetoothName"], port["port"], port)
 			for port in deviceInfoFetcher.comPorts
 			if "bluetoothName" in port
 		),
 		(
-			DeviceMatch(DeviceType.HID, port["hardwareID"], port["devicePath"], port)
+			DeviceMatch(ProtocolType.HID, port["hardwareID"], port["devicePath"], port)
 			for port in deviceInfoFetcher.hidDevices
-			if port["provider"] == "bluetooth"
+			if port["provider"] == CommunicationType.BLUETOOTH
 		),
 	)
 	for match in btDevs:
@@ -570,7 +707,7 @@ def driverSupportsAutoDetection(driver: str) -> bool:
 	@return: C{True} if de driver supports auto detection, C{False} otherwise.
 	"""
 	try:
-		driverCls = braille._getDisplayDriver(driver)
+		driverCls = braille.display._getDisplayDriver(driver)
 	except ImportError:
 		return False
 	return driverCls.isThreadSafe and driverCls.supportsAutomaticDetection
@@ -586,8 +723,8 @@ def driverIsEnabledForAutoDetection(driver: str) -> bool:
 
 def getSupportedBrailleDisplayDrivers(
 	onlyEnabled: bool = False,
-) -> Generator[Type["braille.BrailleDisplayDriver"], Any, Any]:
-	return braille.getDisplayDrivers(
+) -> Generator[type["braille.display.driver.BrailleDisplayDriver"], Any, Any]:
+	return braille.display.getDisplayDrivers(
 		lambda d: (
 			d.isThreadSafe
 			and d.supportsAutomaticDetection
@@ -602,7 +739,7 @@ def getBrailleDisplayDriversEnabledForDetection() -> Generator[str, Any, Any]:
 
 def initialize():
 	"""Initializes bdDetect, such as detection data.
-	Calls to addUsbDevices, and addBluetoothDevices.
+	Calls to addUsbDevice, addUsbDevices, and addBluetoothDevices.
 	Specify the requirements for a detected device to be considered a
 	match for a specific driver.
 	"""
@@ -631,7 +768,7 @@ def terminate():
 class DriverRegistrar:
 	"""An object to facilitate registration of drivers in the bdDetect system.
 	It is instanciated for a specific driver and
-	passed to L{braille.BrailleDisplayDriver.registerAutomaticDetection}.
+	passed to L{braille.display.driver.BrailleDisplayDriver.registerAutomaticDetection}.
 	"""
 
 	_driver: str
@@ -646,32 +783,73 @@ class DriverRegistrar:
 			ret = _driverDevices[self._driver] = DriverDictT(set)
 			return ret
 
-	def addUsbDevices(self, type: DeviceType, ids: set[str], useAsFallBack: bool = False):
+	def addUsbDevice(
+		self,
+		type: ProtocolType,
+		id: str,
+		useAsFallback: bool = False,
+		matchFunc: MatchFuncT | None = None,
+	):
+		"""Associate an USB device with the driver on this instance.
+		:param type: The type of the driver.
+		:param id: A USB ID in the form C{"VID_xxxx&PID_XXXX"}.
+			Note that alphabetical characters in hexadecimal numbers should be uppercase.
+		:param useAsFallback: A boolean flag to determine how this USB device is associated with the driver.
+			If False (default), the device is added directly to the primary driver list for the specified type,
+			meaning it is immediately available for use with the driver.
+			If True, the device is used only if the primary driver cannot use
+			the initial devices, serving as a backup option in case of compatibility issues.
+			This provides flexibility and robustness in managing driver-device connections.
+		@param matchFunc: An optional function which determines whether a given device matches.
+			It takes a L{DeviceMatch} as its only argument
+			and returns a C{bool} indicating whether it matched.
+			It can be used to further constrain a device registration, such as for a specific HID usage page.
+		:raise ValueError: When the provided ID is malformed.
+		"""
+		if not isinstance(id, str) or not USB_ID_REGEX.match(id):
+			raise ValueError(
+				f"Invalid ID provided for driver {self._driver!r}, type {type!r}: {id!r}",
+			)
+		devs = self._getDriverDict()
+		driverUsb = devs[CommunicationType.USB]
+		driverUsb.add(
+			_UsbDeviceRegistryEntry(id=id, type=type, useAsFallback=useAsFallback, matchFunc=matchFunc),
+		)
+
+	def addUsbDevices(
+		self,
+		type: DeviceType,
+		ids: set[str],
+		useAsFallback: bool = False,
+		matchFunc: MatchFuncT = None,
+	):
 		"""Associate USB devices with the driver on this instance.
 		:param type: The type of the driver.
 		:param ids: A set of USB IDs in the form C{"VID_xxxx&PID_XXXX"}.
 			Note that alphabetical characters in hexadecimal numbers should be uppercase.
-		:param useAsFallBack: A boolean flag to determine how USB devices are associated with the driver.
-
+		:param useAsFallback: A boolean flag to determine how USB devices are associated with the driver.
 			If False (default), the devices are added directly to the primary driver list for the specified type,
 			meaning they are immediately available for use with the driver.
 			If True, the devices are added to a fallback list and are used only if the primary driver cannot use
 			the initial devices, serving as a backup option in case of compatibility issues.
 			This provides flexibility and robustness in managing driver-device connections.
+		@param matchFunc: An optional function which determines whether a given device matches.
+			It takes a L{DeviceMatch} as its only argument
+			and returns a C{bool} indicating whether it matched.
+			It can be used to further constrain device registrations, such as for a specific HID usage page.
 		:raise ValueError: When one of the provided IDs is malformed.
 		"""
 		malformedIds = [id for id in ids if not isinstance(id, str) or not USB_ID_REGEX.match(id)]
 		if malformedIds:
 			raise ValueError(
-				f"Invalid IDs provided for driver {self._driver!r}, type {type!r}: "
-				f"{', '.join(malformedIds)}",
+				f"Invalid IDs provided for driver {self._driver!r}, type {type!r}: {', '.join(malformedIds)}",
 			)
-		if useAsFallBack:
-			fallBackDevices.update((self._driver, type, id) for id in ids)
-
 		devs = self._getDriverDict()
-		driverUsb = devs[type]
-		driverUsb.update(ids)
+		driverUsb = devs[CommunicationType.USB]
+		driverUsb.update(
+			_UsbDeviceRegistryEntry(id=id, type=type, useAsFallback=useAsFallback, matchFunc=matchFunc)
+			for id in ids
+		)
 
 	def addBluetoothDevices(self, matchFunc: MatchFuncT):
 		"""Associate Bluetooth HID or COM ports with the driver on this instance.
@@ -680,11 +858,11 @@ class DriverRegistrar:
 			and returns a C{bool} indicating whether it matched.
 		"""
 		devs = self._getDriverDict()
-		devs[DeviceType.BLUETOOTH] = matchFunc
+		devs[CommunicationType.BLUETOOTH] = matchFunc
 
 	def addDeviceScanner(
 		self,
-		scanFunc: Callable[..., Iterable[Tuple[str, DeviceMatch]]],
+		scanFunc: Callable[..., Iterable[DriverAndDeviceMatch]],
 		moveToStart: bool = False,
 	):
 		"""Register a callable to scan devices.
@@ -696,7 +874,7 @@ class DriverRegistrar:
 			@param bluetooth: Whether the handler is expected to yield USB devices.
 			@type bluetooth: bool
 			@param limitToDevices: Drivers to which detection should be limited.
-				C{None} if no driver filtering should occur.
+				``None`` if no driver filtering should occur.
 			@type limitToDevices: Optional[List[str]]
 		@param moveToStart: If C{True}, the registered callable will be moved to the start
 			of the list of registered handlers.

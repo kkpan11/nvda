@@ -1,9 +1,11 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2022 NV Access Limited, Łukasz Golonka, Leonard de Ruijter
+# Copyright (C) 2006-2025 NV Access Limited, Łukasz Golonka, Leonard de Ruijter
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-import typing
+import typing  # noqa: I001
+
+from winBindings import user32
 
 # F401 imported but unused. RelationType should be exposed from IAccessibleHandler, in future __all__
 # should be used to export it.
@@ -11,17 +13,16 @@ from .types import RelationType  # noqa: F401
 
 import re
 import struct
-from typing import (
-	Optional,
-	Tuple,
-	Dict,
-	Union,
-	Set,
+from typing import (  # noqa: UP035
+	Optional,  # noqa: F401
+	Tuple,  # noqa: F401
+	Dict,  # noqa: F401
+	Union,  # noqa: F401
+	Set,  # noqa: F401
 )
 import weakref
 from ctypes import (
 	wintypes,
-	windll,
 	byref,
 	c_void_p,
 	c_char,
@@ -33,6 +34,8 @@ from ctypes import (
 from ctypes.wintypes import HANDLE
 from comtypes import IUnknown, IServiceProvider, COMError
 import comtypes.client
+import winBindings.kernel32
+import winBindings.ole32
 import oleacc
 import JABHandler
 import UIAHandler
@@ -69,7 +72,7 @@ NAVRELATION_EMBEDS = 0x1009
 # childID event params.
 liveNVDAObjectTable = weakref.WeakValueDictionary()
 
-IAccessibleRolesToNVDARoles: Dict[Union[int, str], controlTypes.Role] = {
+IAccessibleRolesToNVDARoles: dict[int | str, controlTypes.Role] = {
 	oleacc.ROLE_SYSTEM_WINDOW: controlTypes.Role.WINDOW,
 	oleacc.ROLE_SYSTEM_CLIENT: controlTypes.Role.PANE,
 	oleacc.ROLE_SYSTEM_TITLEBAR: controlTypes.Role.TITLEBAR,
@@ -228,6 +231,7 @@ IAccessibleStatesToNVDAStates = {
 	oleacc.STATE_SYSTEM_PROTECTED: controlTypes.State.PROTECTED,
 	oleacc.STATE_SYSTEM_SELECTABLE: controlTypes.State.SELECTABLE,
 	oleacc.STATE_SYSTEM_FOCUSABLE: controlTypes.State.FOCUSABLE,
+	oleacc.STATE_SYSTEM_MULTISELECTABLE: controlTypes.State.MULTISELECTABLE,
 }
 
 IAccessible2StatesToNVDAStates = {
@@ -250,44 +254,44 @@ State = controlTypes.State
 
 def _getStatesSetFromIAccessibleStates(
 	IAccessibleStates: int,
-) -> Set[controlTypes.State]:
-	return set(
+) -> set[controlTypes.State]:
+	return set(  # noqa: C401
 		IAccessibleStatesToNVDAStates[IAState]
-		for IAState in IAccessibleStatesToNVDAStates.keys()
+		for IAState in IAccessibleStatesToNVDAStates
 		if IAState & IAccessibleStates
 	)
 
 
-def getStatesSetFromIAccessible2States(IAccessible2States: int) -> Set[State]:
-	return set(
+def getStatesSetFromIAccessible2States(IAccessible2States: int) -> set[State]:
+	return set(  # noqa: C401
 		IAccessible2StatesToNVDAStates[IA2State]
-		for IA2State in IAccessible2StatesToNVDAStates.keys()
+		for IA2State in IAccessible2StatesToNVDAStates
 		if IA2State & IAccessible2States
 	)
 
 
-def getStatesSetFromIAccessibleAttrs(attrs: "textInfos.ControlField") -> Set[State]:
+def getStatesSetFromIAccessibleAttrs(attrs: "textInfos.ControlField") -> set[State]:
 	# States are serialized (in XML) with an attribute per state.
 	# The value for the state is used in the attribute name.
 	# The attribute value is always 1.
 	# EG IAccessible::state_40="1"
 	IAccessibleStateAttrName = "IAccessible::state_{}"
-	return set(
+	return set(  # noqa: C401
 		IAccessibleStatesToNVDAStates[IAState]
-		for IAState in IAccessibleStatesToNVDAStates.keys()
+		for IAState in IAccessibleStatesToNVDAStates
 		if int(attrs.get(IAccessibleStateAttrName.format(IAState), 0))
 	)
 
 
-def getStatesSetFromIAccessible2Attrs(attrs: "textInfos.ControlField") -> Set[State]:
+def getStatesSetFromIAccessible2Attrs(attrs: "textInfos.ControlField") -> set[State]:
 	# States are serialized (in XML) with an attribute per state.
 	# The value for the state is used in the attribute name.
 	# The attribute value is always 1.
 	# EG IAccessible2::state_40="1"
 	IAccessible2StateAttrName = "IAccessible2::state_{}"
-	return set(
+	return set(  # noqa: C401
 		IAccessible2StatesToNVDAStates[IA2State]
-		for IA2State in IAccessible2StatesToNVDAStates.keys()
+		for IA2State in IAccessible2StatesToNVDAStates
 		if int(attrs.get(IAccessible2StateAttrName.format(IA2State), 0))
 	)
 
@@ -300,7 +304,7 @@ def calculateNvdaRole(IARole: int, IAStates: int) -> Role:
 	return role
 
 
-def calculateNvdaStates(IARole: int, IAStates: int) -> Set[State]:
+def calculateNvdaStates(IARole: int, IAStates: int) -> set[State]:
 	"""Convert IAStates bit set into a Set of NVDA States and apply any required transformations."""
 	role = IAccessibleRolesToNVDARoles.get(IARole, Role.UNKNOWN)
 	states = _getStatesSetFromIAccessibleStates(IAStates)
@@ -308,7 +312,7 @@ def calculateNvdaStates(IARole: int, IAStates: int) -> Set[State]:
 	return states
 
 
-def NVDARoleFromAttr(accRole: Optional[str]) -> Role:
+def NVDARoleFromAttr(accRole: str | None) -> Role:
 	if not accRole:  # empty string or None
 		return controlTypes.Role.UNKNOWN
 	assert isinstance(accRole, str)
@@ -320,14 +324,14 @@ def NVDARoleFromAttr(accRole: Optional[str]) -> Role:
 
 
 def normalizeIAccessible(
-	pacc: Union[IUnknown, IA.IAccessible, IA2.IAccessible2],
+	pacc: IUnknown | IA.IAccessible | IA2.IAccessible2,
 	childID: int = 0,
-) -> Union[IA.IAccessible, IA2.IAccessible2]:
+) -> IA.IAccessible | IA2.IAccessible2:
 	if not isinstance(pacc, IA.IAccessible):
 		try:
 			pacc = pacc.QueryInterface(IA.IAccessible)
 		except COMError:
-			raise RuntimeError("%s Not an IAccessible" % pacc)
+			raise RuntimeError("%s Not an IAccessible" % pacc)  # noqa: UP031
 	# #2558: IAccessible2 doesn't support simple children.
 	# Therefore, it doesn't make sense to use IA2 if the child ID is non-0.
 	if childID == 0 and not isinstance(pacc, IA2.IAccessible2):
@@ -339,7 +343,7 @@ def normalizeIAccessible(
 				# and return a null COM pointer. Treat this as if QueryService failed.
 				raise ValueError
 			pacc = pacc2
-		except:  # noqa: E722 Bare except
+		except:  # noqa: E722, S110
 			pass
 	return pacc
 
@@ -347,7 +351,7 @@ def normalizeIAccessible(
 def accessibleObjectFromEvent(window, objectID, childID):
 	try:
 		pacc, childID = oleacc.AccessibleObjectFromEvent(window, objectID, childID)
-	except Exception as e:
+	except Exception as e:  # noqa: BLE001
 		if isMSAADebugLoggingEnabled():
 			log.debugWarning(
 				f"oleacc.AccessibleObjectFromEvent failed with {e}."
@@ -365,10 +369,11 @@ def accessibleObjectFromPoint(x, y):
 	return normalizeIAccessible(pacc, child), child
 
 
-def windowFromAccessibleObject(ia):
+def windowFromAccessibleObject(ia) -> int:
 	try:
 		return oleacc.WindowFromAccessibleObject(ia)
-	except:  # noqa: E722 Bare except
+	except OSError:
+		log.debugWarning("windowFromAccessibleObject failed", exc_info=True)
 		return 0
 
 
@@ -377,7 +382,7 @@ def accessibleChildren(ia, startIndex, numChildren):
 	# new profiles dialogs
 	try:
 		rawChildren = oleacc.AccessibleChildren(ia, startIndex, numChildren)
-	except (WindowsError, COMError):
+	except (OSError, COMError):
 		log.debugWarning("AccessibleChildren failed", exc_info=True)
 		return []
 	children = []
@@ -387,7 +392,7 @@ def accessibleChildren(ia, startIndex, numChildren):
 			# Filtering these out here makes life easier for the caller.
 			continue
 		elif (
-			isinstance(child, comtypes.client.lazybind.Dispatch)
+			isinstance(child, comtypes.client.lazybind.Dispatch)  # noqa: SIM101
 			or isinstance(child, comtypes.client.dynamic._Dispatch)
 			or isinstance(child, IUnknown)
 		):
@@ -402,7 +407,7 @@ def accFocus(ia):
 	try:
 		res = ia.accFocus
 		if (
-			isinstance(res, comtypes.client.lazybind.Dispatch)
+			isinstance(res, comtypes.client.lazybind.Dispatch)  # noqa: SIM101
 			or isinstance(res, comtypes.client.dynamic._Dispatch)
 			or isinstance(res, IUnknown)
 		):
@@ -438,7 +443,7 @@ def accHitTest(ia, x, y):
 	except COMError:
 		return None
 	if (
-		isinstance(res, comtypes.client.lazybind.Dispatch)
+		isinstance(res, comtypes.client.lazybind.Dispatch)  # noqa: SIM101
 		or isinstance(res, comtypes.client.dynamic._Dispatch)
 		or isinstance(res, IUnknown)
 	):
@@ -454,12 +459,12 @@ def accChild(ia, child):
 		if not res:
 			return (ia, child)
 		elif (
-			isinstance(res, comtypes.client.lazybind.Dispatch)
+			isinstance(res, comtypes.client.lazybind.Dispatch)  # noqa: SIM101
 			or isinstance(res, comtypes.client.dynamic._Dispatch)
 			or isinstance(res, IUnknown)
 		):
 			return normalizeIAccessible(res), 0
-	except:  # noqa: E722 Bare except
+	except:  # noqa: E722, S110
 		pass
 	return None
 
@@ -469,7 +474,7 @@ def accParent(ia, child):
 		if not child:
 			res = ia.accParent
 			if (
-				isinstance(res, comtypes.client.lazybind.Dispatch)
+				isinstance(res, comtypes.client.lazybind.Dispatch)  # noqa: SIM101
 				or isinstance(res, comtypes.client.dynamic._Dispatch)
 				or isinstance(res, IUnknown)
 			):
@@ -500,26 +505,26 @@ def accNavigate(pacc, childID, direction):
 			pacc = parentRes[0]
 		return pacc, res
 	elif (
-		isinstance(res, comtypes.client.lazybind.Dispatch)
+		isinstance(res, comtypes.client.lazybind.Dispatch)  # noqa: SIM101
 		or isinstance(res, comtypes.client.dynamic._Dispatch)
 		or isinstance(res, IUnknown)
 	):
 		return normalizeIAccessible(res, 0), 0
 	else:
-		log.debugWarning("Unknown IAccessible type: %s" % res, stack_info=True)
+		log.debugWarning("Unknown IAccessible type: %s" % res, stack_info=True)  # noqa: UP031
 		return None
 
 
 # C901 'winEventToNVDAEvent' is too complex
 # Note: when working on winEventToNVDAEvent, look for opportunities to simplify
 # and move logic out into smaller helper functions.
-def winEventToNVDAEvent(  # noqa: C901
+def winEventToNVDAEvent(
 	eventID: int,
 	window: int,
 	objectID: int,
 	childID: int,
 	useCache: bool = True,
-) -> Optional[Tuple[str, NVDAObjects.IAccessible.IAccessible]]:
+) -> tuple[str, NVDAObjects.IAccessible.IAccessible] | None:
 	"""Tries to convert a win event ID to an NVDA event name, and instantiate or fetch an NVDAObject for
 	 the win event parameters.
 	@param eventID: the win event ID (type)
@@ -549,10 +554,23 @@ def winEventToNVDAEvent(  # noqa: C901
 			)
 		return None
 	# Make sure this window does not have a ghost window if possible
-	if NVDAObjects.window.GhostWindowFromHungWindow and NVDAObjects.window.GhostWindowFromHungWindow(window):
+	if user32._GhostWindowFromHungWindow is not None and user32._GhostWindowFromHungWindow(window):
 		if isMSAADebugLoggingEnabled():
 			log.debug(
 				f"Ghosted hung window. Dropping winEvent {getWinEventLogInfo(window, objectID, childID, eventID)}",
+			)
+		return None
+	# If the owning application has stopped responding, drop the event. Building
+	# the object would make a synchronous cross-process call (e.g. IAccessible
+	# accParent during the focus ancestor walk) that blocks the core until the
+	# watchdog cancels it. This engages as soon as the system flags the app,
+	# without waiting for its DWM ghost window to be created (which is the gap
+	# that previously froze NVDA for several seconds on first contact, and on
+	# every subsequent interaction with the hung window).
+	if winUser.isHungAppWindow(window):
+		if isMSAADebugLoggingEnabled():
+			log.debugWarning(
+				f"Hung application. Dropping winEvent {getWinEventLogInfo(window, objectID, childID, eventID)}",
 			)
 		return None
 	# We do not support MSAA object proxied from native UIA
@@ -597,20 +615,15 @@ def winEventToNVDAEvent(  # noqa: C901
 	return (NVDAEventName, obj)
 
 
-def processGenericWinEvent(eventID, window, objectID, childID):
+def processGenericWinEvent(eventID: int, window: int, objectID: int, childID: int) -> bool:
 	"""Converts the win event to an NVDA event,
 	Checks to see if this NVDAObject  equals the current focus.
 	If all goes well, then the event is queued and we return True
-	@param eventID: a win event ID (type)
-	@type eventID: integer
-	@param window: a win event's window handle
-	@type window: integer
-	@param objectID: a win event's object ID
-	@type objectID: integer
-	@param childID: a win event's child ID
-	@type childID: integer
-	@returns: True if the event was processed, False otherwise.
-	@rtype: boolean
+	:param eventID: a win event ID (type)
+	:param window: a win event's window handle
+	:param objectID: a win event's object ID
+	:param childID: a win event's child ID
+	:return: True if the event was processed, False otherwise.
 	"""
 	if isMSAADebugLoggingEnabled():
 		log.debug(
@@ -676,23 +689,19 @@ def processGenericWinEvent(eventID, window, objectID, childID):
 	return True
 
 
-def processFocusWinEvent(window, objectID, childID, force=False):
+def processFocusWinEvent(window: int, objectID: int, childID: int, force: bool = False) -> bool:
 	"""checks to see if the focus win event is not the same as the existing focus,
 	then converts the win event to an NVDA event (instantiating an NVDA Object) then calls
 	processFocusNVDAEvent. If all is ok it returns True.
-	@type window: integer
-	@param objectID: a win event's object ID
-	@type objectID: integer
-	@param childID: a win event's child ID
-	@type childID: integer
-	@param force: If True, the shouldAllowIAccessibleFocusEvent property of the object is ignored.
-	@type force: boolean
-	@returns: True if the focus is valid and was handled, False otherwise.
-	@rtype: boolean
+	:param window: a win event's window handle
+	:param objectID: a win event's object ID
+	:param childID: a win event's child ID
+	:param force: If True, the shouldAllowIAccessibleFocusEvent property of the object is ignored.
+	:return: True if the focus is valid and was handled, False otherwise.
 	"""
 	if isMSAADebugLoggingEnabled():
 		log.debug(
-			f"Processing focus winEvent: {getWinEventLogInfo(window, objectID, childID)}, " f"force {force}",
+			f"Processing focus winEvent: {getWinEventLogInfo(window, objectID, childID)}, force {force}",
 		)
 	windowClassName = winUser.getClassName(window)
 	# Generally, we must ignore focus on child windows of SDM windows as we only want the SDM MSAA events.
@@ -728,7 +737,7 @@ def processFocusWinEvent(window, objectID, childID, force=False):
 	NVDAEvent = winEventToNVDAEvent(winUser.EVENT_OBJECT_FOCUS, window, objectID, childID, useCache=False)
 	if not NVDAEvent:
 		return False
-	eventName, obj = NVDAEvent
+	eventName, obj = NVDAEvent  # noqa: RUF059
 	if (childID == 0 and obj.IAccessibleRole == oleacc.ROLE_SYSTEM_LIST) or (
 		objectID == winUser.OBJID_CLIENT and "SysListView32" in obj.windowClassName
 	):
@@ -774,20 +783,20 @@ def processFocusNVDAEvent(obj, force=False):
 	return True
 
 
-def processDesktopSwitchWinEvent(window, objectID, childID):
+def processDesktopSwitchWinEvent(window: int, objectID: int, childID: int) -> None:
 	from winAPI.secureDesktop import _handleSecureDesktopChange
 
 	if isMSAADebugLoggingEnabled():
 		log.debug(
 			f"Processing desktopSwitch winEvent: {getWinEventLogInfo(window, objectID, childID)}",
 		)
-	hDesk = windll.user32.OpenInputDesktop(0, False, 0)
-	if hDesk != 0:
-		windll.user32.CloseDesktop(hDesk)
+	hDesk = user32.OpenInputDesktop(0, False, 0)
+	if hDesk is not None:
+		user32.CloseDesktop(hDesk)
 		core.callLater(200, _handleUserDesktop)
 	else:
-		# When hDesk == 0, the active desktop has changed.
-		# This is usually means the secure desktop has been launched,
+		# When hDesk == None, the active desktop has changed.
+		# This usually means the secure desktop has been launched,
 		# but the new desktop can also be a secondary desktop created through the Windows API.
 		# https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-createdesktopa
 		# This secondary desktop has some bugs, and as such is not properly supported (#14395).
@@ -950,7 +959,7 @@ def processMenuStartWinEvent(eventID, window, objectID, childID, validFocus):
 	NVDAEvent = winEventToNVDAEvent(eventID, window, objectID, childID)
 	if not NVDAEvent:
 		return
-	eventName, obj = NVDAEvent
+	eventName, obj = NVDAEvent  # noqa: RUF059
 	if obj.IAccessibleRole != oleacc.ROLE_SYSTEM_MENUPOPUP:
 		# menuStart on anything other than a menu is silly.
 		return
@@ -1001,13 +1010,13 @@ def initialize():
 	global accPropServices
 	try:
 		accPropServices = comtypes.client.CreateObject(IA.CAccPropServices)
-	except (WindowsError, COMError) as e:
-		log.debugWarning("AccPropServices is not available: %s" % e)
+	except (OSError, COMError) as e:
+		log.debugWarning("AccPropServices is not available: %s" % e)  # noqa: UP031
 	internalWinEventHandler.initialize(processDestroyWinEvent)
 
 
 # C901 'pumpAll' is too complex
-def pumpAll():  # noqa: C901
+def pumpAll():
 	if not internalWinEventHandler._shouldGetEvents():
 		return
 	focusWinEvents = []
@@ -1022,7 +1031,9 @@ def pumpAll():  # noqa: C901
 		alwaysAllowedObjects.append((focus.event_windowHandle, focus.event_objectID, focus.event_childID))
 
 	# Receive all the winEvents from the limiter for this cycle
-	winEvents = internalWinEventHandler.winEventLimiter.flushEvents(alwaysAllowedObjects)
+	winEvents: list[tuple[int, int, int, int]] = internalWinEventHandler.winEventLimiter.flushEvents(
+		alwaysAllowedObjects,
+	)
 
 	for winEvent in winEvents:
 		isEventOnCaret = winEvent[2] == winUser.OBJID_CARET
@@ -1103,12 +1114,12 @@ def getIAccIdentity(pacc, childID):
 		if accPropServices:
 			try:
 				hwnd, objectID, childID = accPropServices.DecomposeHwndIdentityString(stringPtr, stringSize)
-				return dict(windowHandle=hwnd, objectID=c_int(objectID).value, childID=childID)
+				return dict(windowHandle=hwnd, objectID=c_int(objectID).value, childID=childID)  # noqa: C408
 			except COMError:
 				hmenu, childID = accPropServices.DecomposeHmenuIdentityString(stringPtr, stringSize)
 				# hmenu is a wireHMENU, but it seems we can just treat this as a number.
 				# comtypes transparently does this for wireHWND.
-				return dict(menuHandle=cast(hmenu, wintypes.HMENU).value, childID=childID)
+				return dict(menuHandle=cast(hmenu, wintypes.HMENU).value, childID=childID)  # noqa: C408
 		stringPtr = cast(stringPtr, POINTER(c_char * stringSize))
 		fields = struct.unpack("IIiI", stringPtr.contents.raw)
 		d = {}
@@ -1120,7 +1131,7 @@ def getIAccIdentity(pacc, childID):
 			d["windowHandle"] = fields[1]
 		return d
 	finally:
-		windll.ole32.CoTaskMemFree(stringPtr)
+		winBindings.ole32.CoTaskMemFree(stringPtr)
 
 
 def findGroupboxObject(obj):
@@ -1154,7 +1165,7 @@ def findGroupboxObject(obj):
 
 
 # C901 'getRecursiveTextFromIAccessibleTextObject'
-def getRecursiveTextFromIAccessibleTextObject(obj, startOffset=0, endOffset=-1):  # noqa: C901
+def getRecursiveTextFromIAccessibleTextObject(obj, startOffset=0, endOffset=-1):
 	if not isinstance(obj, IA2.IAccessibleText):
 		try:
 			textObject = obj.QueryInterface(IA2.IAccessibleText)
@@ -1197,8 +1208,8 @@ def getRecursiveTextFromIAccessibleTextObject(obj, startOffset=0, endOffset=-1):
 			try:
 				index = hypertextObject.hyperlinkIndex(i + startOffset)
 				childTextObject = hypertextObject.hyperlink(index).QueryInterface(IA.IAccessible)
-				t = " %s " % getRecursiveTextFromIAccessibleTextObject(childTextObject)
-			except:  # noqa: E722 Bare except
+				t = " %s " % getRecursiveTextFromIAccessibleTextObject(childTextObject)  # noqa: UP031
+			except:  # noqa: E722, S110
 				pass
 		textList.append(t)
 	return "".join(textList).replace("  ", " ")
@@ -1212,9 +1223,9 @@ ATTRIBS_STRING_BASE64_THRESHOLD = 4096
 
 
 # C901: splitIA2Attribs is too complex
-def splitIA2Attribs(  # noqa: C901
+def splitIA2Attribs(
 	attribsString: str,
-) -> Dict[str, Union[str, Dict]]:
+) -> dict[str, str | dict]:
 	"""Split an IAccessible2 attributes string into a dict of attribute keys and values.
 	An invalid attributes string does not cause an error, but strange results may be returned.
 	Subattributes are handled. Subattribute keys and values are placed into a dict which becomes the value
@@ -1292,7 +1303,7 @@ def isMarshalledIAccessible(IAccessibleObject):
 	see if it was implemented in oleacc.dll (its local) or ole32.dll (its marshalled).
 	"""
 	if not isinstance(IAccessibleObject, IA.IAccessible):
-		raise TypeError("object should be of type IAccessible, not %s" % IAccessibleObject)
+		raise TypeError("object should be of type IAccessible, not %s" % IAccessibleObject)  # noqa: UP031
 	buf = create_unicode_buffer(1024)
 	addr = (
 		POINTER(c_void_p)
@@ -1302,6 +1313,6 @@ def isMarshalledIAccessible(IAccessibleObject):
 		.contents.value
 	)
 	handle = HANDLE()
-	windll.kernel32.GetModuleHandleExW(6, addr, byref(handle))
-	windll.kernel32.GetModuleFileNameW(handle, buf, 1024)
+	winBindings.kernel32.GetModuleHandleEx(6, addr, byref(handle))
+	winBindings.kernel32.GetModuleFileName(handle, buf, 1024)
 	return not buf.value.lower().endswith("oleacc.dll")

@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2023 NV Access Limited, Burman's Computer and Education Ltd.
+# Copyright (C) 2023-2025 NV Access Limited, Burman's Computer and Education Ltd.
 
 """Threads for Tivomatic Caiku Albatross braille display driver.
 Classes:
@@ -12,7 +12,7 @@ to display to keep connection. If display gets nothing within approximately
 2 seconds, it falls back to "wait for connection" state.
 """
 
-import ctypes
+import ctypes  # noqa: I001
 import serial
 
 from ctypes import byref
@@ -30,8 +30,8 @@ from threading import (
 	Thread,
 	Timer,
 )
-from typing import Callable
-
+from collections.abc import Callable
+import winBindings.kernel32
 from .constants import KC_INTERVAL
 
 
@@ -73,7 +73,7 @@ class ReadThread(Thread):
 					self._event.wait(KC_INTERVAL)
 					continue
 				log.debug(
-					f"Port {self._dev.name} present, calling {self._readFunction.__name__} " "to open it",
+					f"Port {self._dev.name} present, calling {self._readFunction.__name__} to open it",
 				)
 				self._readFunction()
 				if not self._dev.is_open:
@@ -91,7 +91,7 @@ class ReadThread(Thread):
 					self._disableFunction()
 					log.debug("SetCommMask failed")
 					continue
-				result = ctypes.windll.kernel32.WaitCommEvent(
+				result = winBindings.kernel32.WaitCommEvent(
 					self._dev._port_handle,
 					byref(dwEvtMask),
 					byref(self._dev._overlapped_read),
@@ -102,7 +102,7 @@ class ReadThread(Thread):
 					self._disableFunction()
 					log.debug("WaitCommEvent failed")
 					continue
-				result = ctypes.windll.kernel32.GetOverlappedResult(
+				result = winBindings.kernel32.GetOverlappedResult(
 					self._dev._port_handle,
 					byref(self._dev._overlapped_read),
 					byref(data),

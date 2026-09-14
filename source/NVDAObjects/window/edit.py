@@ -1,25 +1,17 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2023 NV Access Limited, Babbage B.V., Cyrille Bougot, Leonard de Ruijter
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
+# Copyright (C) 2006-2026 NV Access Limited, Babbage B.V., Cyrille Bougot, Leonard de Ruijter, Wang Chong
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-from typing import (
-	Dict,
-	Optional,
-	Union,
-)
-
-import comtypes.client
-import ctypes
-from comtypes import COMError
-import oleTypes
+import ctypes  # noqa: I001
+from comtypes import BSTR, COMError
 import colors
-import NVDAHelper
 import eventHandler
 import comInterfaces.tom
 from logHandler import log
 import languageHandler
 import config
+import oleacc
 import winKernel
 import api
 import winUser
@@ -34,6 +26,9 @@ from ..behaviors import EditableTextWithAutoSelectDetection
 import watchdog
 import locationHelper
 import textUtils
+from textUtils.segFlag import CharSegFlag, WordSegFlag
+import NVDAHelper.localLib
+
 
 selOffsetsAtLastCaretEvent = None
 
@@ -169,6 +164,13 @@ WB_RIGHTBREAK = 7
 
 
 class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
+	# Override segFlags to enforce use of Uniscribe
+	charSegFlag = CharSegFlag.UNISCRIBE
+
+	@property
+	def wordSegFlag(self) -> WordSegFlag:
+		return WordSegFlag.UNISCRIBE
+
 	def _getPointFromOffset(self, offset):
 		if self.obj.editAPIVersion == 1 or self.obj.editAPIVersion >= 3:
 			processHandle = self.obj.processHandle
@@ -207,7 +209,7 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 		# the control returns -1.
 		if point.x < 0 or point.y < 0:
 			raise LookupError(
-				"Point with client coordinates x=%d, y=%d not within client area of object"
+				"Point with client coordinates x=%d, y=%d not within client area of object"  # noqa: UP031
 				% (point.x, point.y),
 			)
 		return point.toScreen(self.obj.windowHandle)
@@ -316,12 +318,12 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 	# C901 '_getFormatFieldAndOffsets' is too complex
 	# Note: when working on _getFormatFieldAndOffsets look for opportunities to simplify
 	# and move logic out into smaller helper functions.
-	def _getFormatFieldAndOffsets(self, offset, formatConfig, calculateOffsets=True):  # noqa: C901
+	def _getFormatFieldAndOffsets(self, offset, formatConfig, calculateOffsets=True):
 		# Basic edit fields do not support formatting at all.
 		# Formatting for unidentified edit fields is ignored.
 		# Note that unidentified rich edit fields will most likely use L{ITextDocumentTextInfo}.
 		if self.obj.editAPIVersion < 1:
-			return super(EditTextInfo, self)._getFormatFieldAndOffsets(
+			return super()._getFormatFieldAndOffsets(
 				offset,
 				formatConfig,
 				calculateOffsets=calculateOffsets,
@@ -373,7 +375,7 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 
 	def _setFormatFieldColor(
 		self,
-		charFormat: Union[CharFormat2AStruct, CharFormat2WStruct],
+		charFormat: CharFormat2AStruct | CharFormat2WStruct,
 		formatField: textInfos.FormatField,
 	) -> None:
 		if charFormat.dwEffects & CFE_AUTOCOLOR:
@@ -421,12 +423,12 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 		else:
 			start = ctypes.c_uint()
 			end = ctypes.c_uint()
-			res = watchdog.cancellableSendMessage(  # noqa: F841
+			watchdog.cancellableSendMessage(
 				self.obj.windowHandle,
 				winUser.EM_GETSEL,
 				ctypes.byref(start),
 				ctypes.byref(end),
-			)  # noqa: F841
+			)
 			return start.value, end.value
 
 	def _setSelectionOffsets(self, start, end):
@@ -466,7 +468,7 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 
 	def _getStoryText(self):
 		if controlTypes.State.PROTECTED in self.obj.states:
-			return "*" * (self._getStoryLength() - 1)
+			return "*" * self._getStoryLength()
 		return self.obj.windowText
 
 	def _getStoryLength(self):
@@ -501,18 +503,12 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 				)
 			finally:
 				winKernel.virtualFreeEx(processHandle, internalInfo, 0, winKernel.MEM_RELEASE)
-			# Py3 review: investigation with Python 2 NVDA revealed that
-			# adding 1 to this creates an off by one error.
-			# Tested using Wordpad, enforcing EditTextInfo as the textInfo implementation.
-			return textLen + 1
+			return textLen
 		else:
 			# ForWM_GETTEXTLENGTH documentation, see
 			# https://docs.microsoft.com/en-us/windows/desktop/winmsg/wm-gettextlength
 			# It determines the length, in characters, of the text associated with a window.
-			# Py3 review: investigation with Python 2 NVDA revealed that
-			# adding 1 to this created an off by one error.
-			# Tested using Notepad
-			return watchdog.cancellableSendMessage(self.obj.windowHandle, winUser.WM_GETTEXTLENGTH, 0, 0) + 1
+			return watchdog.cancellableSendMessage(self.obj.windowHandle, winUser.WM_GETTEXTLENGTH, 0, 0)
 
 	def _getLineCount(self):
 		return self.obj.windowTextLineCount
@@ -585,7 +581,7 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 			if text and controlTypes.State.PROTECTED in self.obj.states:
 				text = "*" * len(text)
 		else:
-			text = super(EditTextInfo, self)._getTextRange(start, end)
+			text = super()._getTextRange(start, end)
 		return text
 
 	def _getWordOffsets(self, offset):
@@ -615,7 +611,7 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 			if self._getTextRange(offset, offset + 1) in ["\r", "\n"]:
 				return offset, offset + 1
 			else:
-				return super(EditTextInfo, self)._getWordOffsets(offset)
+				return super()._getWordOffsets(offset)
 
 	def _getLineNumFromOffset(self, offset):
 		if self.obj.editAPIVersion >= 1:
@@ -637,7 +633,7 @@ class EditTextInfo(textInfos.offsets.OffsetsTextInfo):
 			and self._getLineCount() <= 0
 			and self._getStoryLength() > 0
 		):
-			return super(EditTextInfo, self)._getLineOffsets(offset)
+			return super()._getLineOffsets(offset)
 		# Some edit controls that show both line feed and carage return can give a length not including the line feed
 		if end <= offset:
 			end = offset + 1
@@ -660,14 +656,13 @@ ITextDocumentUnitsToNVDAUnits = {
 	comInterfaces.tom.tomStory: textInfos.UNIT_STORY,
 }
 
-NVDAUnitsToITextDocumentUnits: Dict[str, int] = {
+NVDAUnitsToITextDocumentUnits: dict[str, int] = {
 	textInfos.UNIT_CHARACTER: comInterfaces.tom.tomCharacter,
 	textInfos.UNIT_WORD: comInterfaces.tom.tomWord,
 	textInfos.UNIT_LINE: comInterfaces.tom.tomLine,
 	textInfos.UNIT_SENTENCE: comInterfaces.tom.tomSentence,
 	textInfos.UNIT_PARAGRAPH: comInterfaces.tom.tomParagraph,
 	textInfos.UNIT_STORY: comInterfaces.tom.tomStory,
-	textInfos.UNIT_READINGCHUNK: comInterfaces.tom.tomLine,
 }
 
 
@@ -682,7 +677,7 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 	# C901 '_getFormatFieldAtRange' is too complex
 	# Note: when working on _getFormatFieldAtRange look for opportunities to simplify
 	# and move logic out into smaller helper functions.
-	def _getFormatFieldAtRange(self, textRange, formatConfig):  # noqa: C901
+	def _getFormatFieldAtRange(self, textRange, formatConfig):
 		formatField = textInfos.FormatField()
 		fontObj = None
 		paraFormatObj = None
@@ -744,7 +739,6 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 				formatField["language"] = languageHandler.windowsLCIDToLocaleName(langId)
 		except:  # noqa: E722
 			log.debugWarning("language error", exc_info=True)
-			pass
 		return formatField
 
 	def _setFormatFieldColor(
@@ -787,31 +781,25 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 			chunkRange.expand(comInterfaces.tom.tomParagraph)
 		chunkStart = chunkRange.start
 		chunkEnd = chunkRange.end
-		if startLimit < chunkStart:
-			startLimit = chunkStart
-		if endLimit > chunkEnd:
-			endLimit = chunkEnd
+		startLimit = max(startLimit, chunkStart)
+		endLimit = min(endLimit, chunkEnd)
 		# textRange.moveEnd(comInterfaces.tom.tomCharFormat,1)
 		textRange.expand(comInterfaces.tom.tomCharFormat)
-		if textRange.end > endLimit:
-			textRange.end = endLimit
-		if textRange.start < startLimit:
-			textRange.start = startLimit
+		textRange.end = min(textRange.end, endLimit)
+		textRange.start = max(textRange.start, startLimit)
 
 	def _getEmbeddedObjectLabel(self, embedRangeObj):
 		label = None
 		try:
 			o = embedRangeObj.GetEmbeddedObject()
-		except comtypes.COMError:
+		except COMError:
 			o = None
 		if not o:
 			return None
 		# Outlook >=2007 exposes MSAA on its embedded objects thus we can use accName as the label
-		import oleacc
-
 		try:
 			label = o.QueryInterface(oleacc.IAccessible).accName(0)
-		except comtypes.COMError:
+		except COMError:
 			pass
 		if label:
 			return label
@@ -834,23 +822,25 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 		if label and not label.isspace():
 			return label
 		# Windows Live Mail exposes the label via the embedded object's data (IDataObject)
+		text = BSTR()
 		try:
-			dataObj = o.QueryInterface(oleTypes.IDataObject)
-		except comtypes.COMError:
-			dataObj = None
-		if dataObj:
-			text = comtypes.BSTR()
-			res = NVDAHelper.localLib.getOleClipboardText(dataObj, ctypes.byref(text))  # noqa: F841
+			NVDAHelper.localLib.getOleClipboardText(o, ctypes.byref(text))
+		except OSError:
+			pass
+		else:
 			label = text.value
 		if label:
 			return label
-		# As a final fallback (e.g. could not get display  model text for Outlook Express), use the embedded object's user type (e.g. "recipient").
+		# As a final fallback (e.g. could not get display model text for Outlook Express), use the embedded object's user type (e.g. "recipient").
+		userType = BSTR()
 		try:
-			oleObj = o.QueryInterface(oleTypes.IOleObject)
-			label = oleObj.GetUserType(1)
-		except comtypes.COMError:
+			NVDAHelper.localLib.getOleUserType(o, 0, ctypes.byref(userType))
+		except OSError:
 			pass
-		return label
+		else:
+			label = userType.value
+		if label:
+			return label
 
 	def _getTextAtRange(self, rangeObj):
 		embedRangeObj = None
@@ -880,7 +870,7 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 		return "".join(newTextList)
 
 	def __init__(self, obj, position, _rangeObj=None):
-		super(ITextDocumentTextInfo, self).__init__(obj, position)
+		super().__init__(obj, position)
 		if _rangeObj:
 			self._rangeObj = _rangeObj.Duplicate
 			return
@@ -909,9 +899,9 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 		elif isinstance(position, textInfos.offsets.Offsets):
 			self._rangeObj = self.obj.ITextDocumentObject.range(position.startOffset, position.endOffset)
 		else:
-			raise NotImplementedError("position: %s" % position)
+			raise NotImplementedError("position: %s" % position)  # noqa: UP031
 
-	def getTextWithFields(self, formatConfig: Optional[Dict] = None) -> textInfos.TextInfo.TextWithFieldsT:
+	def getTextWithFields(self, formatConfig: dict | None = None) -> textInfos.TextInfo.TextWithFieldsT:
 		if not formatConfig:
 			formatConfig = config.conf["documentFormatting"]
 		textRange = self._rangeObj.duplicate
@@ -944,10 +934,11 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 		return commandList
 
 	def expand(self, unit):
+		unit = self._resolveReadingChunkUnit(unit)
 		if unit in NVDAUnitsToITextDocumentUnits:
 			self._rangeObj.Expand(NVDAUnitsToITextDocumentUnits[unit])
 		else:
-			raise NotImplementedError("unit: %s" % unit)
+			raise NotImplementedError("unit: %s" % unit)  # noqa: UP031
 
 	def compareEndPoints(self, other, which):
 		if which == "startToStart":
@@ -959,7 +950,7 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 		elif which == "endToEnd":
 			diff = self._rangeObj.End - other._rangeObj.End
 		else:
-			raise ValueError("bad argument - which: %s" % which)
+			raise ValueError("bad argument - which: %s" % which)  # noqa: UP031
 		if diff < 0:
 			diff = -1
 		elif diff > 0:
@@ -976,10 +967,10 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 		elif which == "endToEnd":
 			self._rangeObj.End = other._rangeObj.End
 		else:
-			raise ValueError("bad argument - which: %s" % which)
+			raise ValueError("bad argument - which: %s" % which)  # noqa: UP031
 
 	def _get_isCollapsed(self):
-		if self._rangeObj.Start == self._rangeObj.End:
+		if self._rangeObj.Start == self._rangeObj.End:  # noqa: SIM103
 			return True
 		else:
 			return False
@@ -1002,10 +993,11 @@ class ITextDocumentTextInfo(textInfos.TextInfo):
 		return self._getTextAtRange(self._rangeObj)
 
 	def move(self, unit, direction, endPoint=None):
+		unit = self._resolveReadingChunkUnit(unit)
 		if unit in NVDAUnitsToITextDocumentUnits:
 			unit = NVDAUnitsToITextDocumentUnits[unit]
 		else:
-			raise NotImplementedError("unit: %s" % unit)
+			raise NotImplementedError("unit: %s" % unit)  # noqa: UP031
 		if endPoint == "start":
 			moveFunc = self._rangeObj.MoveStart
 		elif endPoint == "end":
@@ -1046,8 +1038,8 @@ class Edit(EditableTextWithAutoSelectDetection, EditBase):
 	editAPIVersion = 0
 	editValueUnit = textInfos.UNIT_LINE
 
-	def _get_TextInfo(self):
-		if self.editAPIVersion != 0 and self.ITextDocumentObject:
+	def _get_TextInfo(self) -> type[textInfos.TextInfo]:
+		if self.editAPIVersion != 0 and self.ITextDocumentObject and self.ITextSelectionObject:
 			return ITextDocumentTextInfo
 		else:
 			return EditTextInfo
@@ -1055,16 +1047,13 @@ class Edit(EditableTextWithAutoSelectDetection, EditBase):
 	def _get_ITextDocumentObject(self):
 		if not hasattr(self, "_ITextDocumentObject"):
 			try:
-				ptr = ctypes.POINTER(comInterfaces.tom.ITextDocument)()
-				ctypes.windll.oleacc.AccessibleObjectFromWindow(
+				self._ITextDocumentObject = oleacc.AccessibleObjectFromWindow(
 					self.windowHandle,
-					-16,
-					ctypes.byref(ptr._iid_),
-					ctypes.byref(ptr),
+					winUser.OBJID_NATIVEOM,
+					interface=comInterfaces.tom.ITextDocument,
 				)
-				self._ITextDocumentObject = ptr
-			except:  # noqa: E722
-				log.error("Error getting ITextDocument", exc_info=True)
+			except (COMError, OSError):
+				log.debugWarning("Error getting ITextDocument", exc_info=True)
 				self._ITextDocumentObject = None
 		return self._ITextDocumentObject
 
@@ -1089,7 +1078,7 @@ class Edit(EditableTextWithAutoSelectDetection, EditBase):
 			return
 		if eventHandler.isPendingEvents("valueChange", self):
 			self.hasContentChangedSinceLastSelection = True
-		super(Edit, self).event_caret()
+		super().event_caret()
 
 	def event_valueChange(self):
 		self.event_textChange()
@@ -1100,12 +1089,12 @@ class RichEdit(Edit):
 
 	def makeTextInfo(self, position):
 		if self.TextInfo is not ITextDocumentTextInfo:
-			return super(RichEdit, self).makeTextInfo(position)
+			return super().makeTextInfo(position)
 		# #4090: Sometimes ITextDocument support can fail (security restrictions in Outlook 2010)
 		# We then fall back to normal Edit support.
 		try:
 			return self.TextInfo(self, position)
-		except COMError:
+		except (COMError, AttributeError):
 			log.debugWarning("Could not instanciate ITextDocumentTextInfo", exc_info=True)
 			self.TextInfo = EditTextInfo
 			return self.TextInfo(self, position)

@@ -1,10 +1,10 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2012-2024 NV Access Limited, Beqa Gozalishvili, Joseph Lee,
+# Copyright (C) 2012-2026 NV Access Limited, Beqa Gozalishvili, Joseph Lee,
 # Babbage B.V., Ethan Holliger, Arnold Loubriat, Thomas Stivers
 
-import weakref
+import weakref  # noqa: I001
 
 import addonAPIVersion
 import wx
@@ -17,7 +17,6 @@ from logHandler import log
 import addonHandler
 from . import guiHelper
 from . import nvdaControls
-from .message import displayDialogAsModal
 from .dpiScalingHelper import DpiScalingHelperMixinWithoutInit
 import gui.contextHelp
 import ui
@@ -112,15 +111,9 @@ class ErrorAddonInstallDialog(nvdaControls.MessageDialog):
 		)
 		okButton.SetDefault()
 		okButton.Bind(wx.EVT_BUTTON, lambda evt: self.EndModal(wx.OK))
-		displayDialogAsModal(
-			IncompatibleAddonsDialog(
-				parent=self,
-				# the defaults from the addon GUI are fine. We are testing against the running version.
-			),
-		)
 
 
-def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
+def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:
 	"""Installs the addon bundle at path.
 	Only used for installing external add-on bundles.
 	Any error messages / warnings are presented to the user via a GUI message box.
@@ -128,7 +121,7 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 	@return True on success or False on failure.
 	@note See also L{addonStore.install.installAddon}
 	"""
-	from gui.addonStoreGui.controls.messageDialogs import (
+	from gui.addonStoreGui.controls.messageDialogs import (  # noqa: I001
 		_showAddonRequiresNVDAUpdateDialog,
 		_showConfirmAddonInstallDialog,
 		_shouldInstallWhenAddonTooOldDialog,
@@ -137,7 +130,7 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 	try:
 		bundle = addonHandler.AddonBundle(addonPath)
 	except:  # noqa: E722
-		log.error("Error opening addon bundle from %s" % addonPath, exc_info=True)
+		log.error("Error opening addon bundle from %s" % addonPath, exc_info=True)  # noqa: G201, UP031
 		gui.messageBox(
 			# Translators: The message displayed when an error occurs when opening an add-on package for adding.
 			_("Failed to open add-on package file at %s - missing file or invalid file format") % addonPath,
@@ -151,7 +144,7 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 		_showAddonRequiresNVDAUpdateDialog(parentWindow, bundle._addonGuiModel)
 		return False  # Exit early, addon does not have required support
 	elif bundle.canOverrideCompatibility:
-		shouldInstall, rememberChoice = _shouldInstallWhenAddonTooOldDialog(
+		shouldInstall, rememberChoice = _shouldInstallWhenAddonTooOldDialog(  # noqa: RUF059
 			parentWindow,
 			bundle._addonGuiModel,
 		)
@@ -210,9 +203,9 @@ def installAddon(parentWindow: wx.Window, addonPath: str) -> bool:  # noqa: C901
 def _doneAndDestroy(window: gui.IndeterminateProgressDialog):
 	try:
 		yield window
-	except Exception as e:
+	except Exception as e:  # noqa: TRY203
 		# pass on any exceptions
-		raise e
+		raise e  # noqa: TRY201
 	finally:
 		# but ensure that done and Destroy are called.
 		window.done()
@@ -257,7 +250,7 @@ def _performExternalAddonBundleInstall(
 	else:
 		log.error(f"Error(s) installing addon bundle from {bundle}")
 		for e in bundle._installExceptions:
-			log.error(e, exc_info=True)
+			log.error(e, exc_info=True)  # noqa: LOG014
 		gui.messageBox(
 			# Translators: The message displayed when an error occurs when installing an add-on package.
 			_("Failed to install add-on from %s") % bundle._path,
@@ -300,14 +293,14 @@ class IncompatibleAddonsDialog(
 		return None until this is replaced with a weakref.ref object. Then the instance is retrieved
 		with by treating that object as a callable.
 		"""
-		return None
+		return
 
 	helpId = "IncompatibleAddonsManager"
 
 	def __new__(cls, *args, **kwargs):
 		instance = IncompatibleAddonsDialog._instance()
 		if instance is None:
-			return super(IncompatibleAddonsDialog, cls).__new__(cls, *args, **kwargs)
+			return super().__new__(cls, *args, **kwargs)
 		return instance
 
 	def __init__(
@@ -345,11 +338,12 @@ class IncompatibleAddonsDialog(
 		sHelper = guiHelper.BoxSizerHelper(self, sizer=settingsSizer)
 		maxControlWidth = 550
 		introText = _(
-			# Translators: The title of the Incompatible Addons Dialog
-			"The following add-ons are incompatible with NVDA version {}."
+			# Translators: The title of the Incompatible Addons Dialog.
+			# {version} will be replaced with the API version number.
+			"The following add-ons are incompatible with NVDA version {version}."
 			" These add-ons can not be enabled."
 			" Please contact the add-on author for further assistance.",
-		).format(addonAPIVersion.formatForGUI(self._APIVersion))
+		).format(version=addonAPIVersion.formatForGUI(self._APIVersion))
 		AddonSelectionIntroLabel = wx.StaticText(self, label=introText)
 		AddonSelectionIntroLabel.Wrap(self.scaleSize(maxControlWidth))
 		sHelper.addItem(AddonSelectionIntroLabel)

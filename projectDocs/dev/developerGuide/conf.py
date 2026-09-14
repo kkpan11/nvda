@@ -8,13 +8,8 @@
 # -- Path setup --------------------------------------------------------------
 
 import os
-import sys
 
 _appDir = os.path.abspath(os.path.join("..", "..", "..", "source"))
-
-sys.path.insert(0, _appDir)
-import sourceEnv  # noqa: F401, E402
-
 
 # Apply several monkey patches to comtypes.
 # Add our `comInterfaces` to the `comtypes.gen` search path to replicate the behavior at runtime
@@ -23,18 +18,18 @@ import sourceEnv  # noqa: F401, E402
 # used for developer documentation build, "ImportError: Typelib different than module" is raised
 # by comTypes.
 # This patch causes the error to be ignored, which matches the behavior at runtime.
-import monkeyPatches.comtypesMonkeyPatches  # noqa: E402
+import monkeyPatches.comtypesMonkeyPatches
 
 monkeyPatches.comtypesMonkeyPatches.replace_check_version()
 monkeyPatches.comtypesMonkeyPatches.appendComInterfacesToGenSearchPath()
 
 # Initialize languageHandler so that sphinx is able to deal with translatable strings.
-import languageHandler  # noqa: E402
+import languageHandler
 
 languageHandler.setLanguage("en")
 
 # Initialize globalVars.appArgs to something sensible.
-import globalVars  # noqa: E402
+import globalVars  # noqa: I001
 
 
 # Set an empty config path
@@ -49,26 +44,27 @@ globalVars.appDir = _appDir
 
 
 # Import NVDA's versionInfo module.
-import versionInfo  # noqa: E402
+import buildVersion
+import versionInfo
 
 # Set a suitable updateVersionType for the updateCheck module to be imported
-versionInfo.updateVersionType = "stable"
+buildVersion.updateVersionType = "stable"
 
 # -- Project information -----------------------------------------------------
 
-project = versionInfo.name
+project = buildVersion.name
 copyright = versionInfo.copyright
-author = versionInfo.publisher
+author = buildVersion.publisher
 
 # The major project version
-version = versionInfo.formatVersionForGUI(
-	versionInfo.version_year,
-	versionInfo.version_major,
-	versionInfo.version_minor,
+version = buildVersion.formatVersionForGUI(
+	buildVersion.version_year,
+	buildVersion.version_major,
+	buildVersion.version_minor,
 )
 
 # The full version, including alpha/beta/rc tags
-release = versionInfo.version
+release = buildVersion.version
 
 # -- General configuration ---------------------------------------------------
 
@@ -111,9 +107,9 @@ autodoc_mock_imports = [
 
 # Perform some manual mocking of specific objects.
 # autodoc can only mock modules, not objects.
-from sphinx.ext.autodoc.mock import _make_subclass  # noqa: E402
+from sphinx.ext.autodoc._dynamic._mock import _make_subclass  # noqa: I001
 
-import config  # noqa: E402
+import config
 
 # Mock an instance of the configuration manager.
 config.conf = _make_subclass("conf", "config")()

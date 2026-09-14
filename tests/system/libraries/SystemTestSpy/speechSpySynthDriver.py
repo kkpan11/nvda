@@ -10,7 +10,7 @@ Note: The name of this module must match the name of the synth driver, and the c
 in the `tests/system/nvdaSettingsFiles/*.ini` files.
 """
 
-import queue
+import queue  # noqa: I001
 import threading
 import time
 
@@ -30,6 +30,7 @@ class SpeechSpySynthDriver(synthDriverHandler.SynthDriver):
 
 	name = "SpeechSpySynthDriver"  # Name must match configuration files and module.
 	description = "System test speech spy"
+	availableLanguages = {"en", "es", "es_ES", "fr", "la"}  # noqa: RUF012
 
 	def __init__(self):
 		super().__init__()
@@ -53,8 +54,8 @@ class SpeechSpySynthDriver(synthDriverHandler.SynthDriver):
 	def check(cls):
 		return True
 
-	supportedSettings = []
-	supportedNotifications = {
+	supportedSettings = []  # noqa: RUF012
+	supportedNotifications = {  # noqa: RUF012
 		synthDriverHandler.synthIndexReached,
 		synthDriverHandler.synthDoneSpeaking,
 	}
@@ -98,9 +99,11 @@ class SpeechSpySynthDriver(synthDriverHandler.SynthDriver):
 					if self._speechStarted:
 						self._doDoneSpeaking()
 						self._speechStarted = False
-					continue
-				self._speechStarted = True
-				self._processSpeechSequence(speechSequence)
+					else:
+						_yieldThread()
+				else:
+					self._speechStarted = True
+					self._processSpeechSequence(speechSequence)
 		log.debug("Stopping")
 
 	def _processSpeechSequence(self, speechSequence: SpeechSequence):

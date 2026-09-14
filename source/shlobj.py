@@ -11,11 +11,14 @@ or location on any given system. For example, the system folder may be "C:\Windo
 and "C:\Winnt" on another.
 """
 
-import comtypes
+import comtypes  # noqa: I001
 import ctypes
 from enum import Enum
 import functools
-from typing import Optional, Union
+
+
+import winBindings.shell32
+import winBindings.ole32
 
 
 class FolderId(str, Enum):
@@ -40,9 +43,9 @@ class FolderId(str, Enum):
 
 @functools.lru_cache(maxsize=128)
 def SHGetKnownFolderPath(
-	folderGuid: Union[FolderId, str],
+	folderGuid: FolderId | str,
 	dwFlags: int = 0,
-	hToken: Optional[int] = None,
+	hToken: int | None = None,
 ) -> str:
 	"""Wrapper for `SHGetKnownFolderPath` which caches the results
 	to avoid calling the win32 function unnecessarily."""
@@ -51,7 +54,7 @@ def SHGetKnownFolderPath(
 	guid = comtypes.GUID(folderGuid)
 
 	pathPointer = ctypes.c_wchar_p()
-	res = ctypes.windll.shell32.SHGetKnownFolderPath(
+	res = winBindings.shell32.SHGetKnownFolderPath(
 		comtypes.byref(guid),
 		dwFlags,
 		hToken,
@@ -60,5 +63,5 @@ def SHGetKnownFolderPath(
 	if res != 0:
 		raise RuntimeError(f"SHGetKnownFolderPath failed with error code {res}")
 	path = pathPointer.value
-	ctypes.windll.ole32.CoTaskMemFree(pathPointer)
+	winBindings.ole32.CoTaskMemFree(pathPointer)
 	return path

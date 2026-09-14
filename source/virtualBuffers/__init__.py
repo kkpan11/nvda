@@ -1,41 +1,29 @@
-# -*- coding: UTF-8 -*-
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2007-2023 NV Access Limited, Peter Vágner, Cyrille Bougot
+# Copyright (C) 2007-2025 NV Access Limited, Peter Vágner, Cyrille Bougot, Leonard de Ruijter
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-import time
+import time  # noqa: I001
 import threading
 import ctypes
-import collections  # noqa: F401
-import itertools  # noqa: F401
-from typing import (
-	Optional,
-	Dict,
+from typing import (  # noqa: UP035
+	Optional,  # noqa: F401
+	Dict,  # noqa: F401
 )
 import weakref
 import wx
-import review  # noqa: F401
 import NVDAHelper
 import XMLFormatting
 import scriptHandler
-from scriptHandler import script
-import speech  # noqa: F401
-import NVDAObjects  # noqa: F401
 import api
 import controlTypes
 import textInfos.offsets
 import config
-import cursorManager  # noqa: F401
 import browseMode
-import gui  # noqa: F401
-import eventHandler  # noqa: F401
 import braille
 import queueHandler
 from logHandler import log
 import ui
-import aria  # noqa: F401
-import treeInterceptorHandler  # noqa: F401
 import watchdog
 from abc import abstractmethod
 import documentBase
@@ -45,6 +33,10 @@ VBufStorage_findDirection_forward = 0
 VBufStorage_findDirection_back = 1
 VBufStorage_findDirection_up = 2
 VBufRemote_nodeHandle_t = ctypes.c_ulonglong
+
+
+def _normalizeIdentifier(docHandle: int | None, ID: int | None) -> tuple[int, int]:
+	return (docHandle if docHandle is not None else 0, ID if ID is not None else 0)
 
 
 class VBufStorage_findMatch_word(str):
@@ -65,7 +57,7 @@ FINDBYATTRIBS_ESCAPE_TABLE.update({(ord(s), "\\" + s) for s in "^$.*+?()[]{}|"})
 
 def _prepareForFindByAttributes(attribs):
 	# A lambda that coerces a value to a string and escapes characters suitable for a regular expression.
-	escape = lambda val: str(val).translate(FINDBYATTRIBS_ESCAPE_TABLE)  # noqa: E731
+	escape = lambda val: str(val).translate(FINDBYATTRIBS_ESCAPE_TABLE)
 	reqAttrs = []
 	regexp = []
 	if isinstance(attribs, dict):
@@ -75,12 +67,12 @@ def _prepareForFindByAttributes(attribs):
 	# so first build the list of requested attributes.
 	for option in attribs:
 		for name in option:
-			reqAttrs.append(name)
+			reqAttrs.append(name)  # noqa: PERF402
 	# Now build the regular expression.
 	for option in attribs:
 		optRegexp = []
 		for name in reqAttrs:
-			optRegexp.append("%s:" % escape(name))
+			optRegexp.append("%s:" % escape(name))  # noqa: UP031
 			values = option.get(name)
 			if not values:
 				# The value isn't tested for this attribute, so match any (or no) value.
@@ -105,7 +97,7 @@ def _prepareForFindByAttributes(attribs):
 class VirtualBufferQuickNavItem(browseMode.TextInfoQuickNavItem):
 	def __init__(self, itemType, document, vbufNode, startOffset, endOffset):
 		textInfo = document.makeTextInfo(textInfos.offsets.Offsets(startOffset, endOffset))
-		super(VirtualBufferQuickNavItem, self).__init__(itemType, document, textInfo)
+		super().__init__(itemType, document, textInfo)
 		docHandle = ctypes.c_int()
 		ID = ctypes.c_int()
 		NVDAHelper.localLib.VBuf_getIdentifierFromControlFieldNode(
@@ -156,11 +148,13 @@ class VirtualBufferQuickNavItem(browseMode.TextInfoQuickNavItem):
 					return True
 			except (KeyError, ValueError, TypeError):
 				return False
-		return super(VirtualBufferQuickNavItem, self).isChild(parent)
+		return super().isChild(parent)
 
 
 class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.offsets.OffsetsTextInfo):
-	allowMoveToOffsetPastEnd = False  #: no need for end insertion point as vbuf is not editable.
+	def allowMoveToUnitOffsetPastEnd(self, unit: str) -> bool:
+		"""Virtual buffers have no insertion point, so no need to move past the end of text."""
+		return False
 
 	def _getControlFieldAttribs(self, docHandle, id):
 		info = self.copy()
@@ -193,7 +187,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 			ctypes.byref(node),
 		)
 		if not any((docHandle.value, ID.value)):
-			raise LookupError("Neither docHandle nor ID found for offset %d" % offset)
+			raise LookupError("Neither docHandle nor ID found for offset %d" % offset)  # noqa: UP031
 		return docHandle.value, ID.value
 
 	def _getOffsetsFromFieldIdentifier(self, docHandle, ID):
@@ -219,7 +213,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 	def _getBoundingRectFromOffset(self, offset):
 		o = self._getNVDAObjectFromOffset(offset)
 		if not o:
-			raise LookupError("no NVDAObject at offset %d" % offset)
+			raise LookupError("no NVDAObject at offset %d" % offset)  # noqa: UP031
 		if o.hasIrrelevantLocation:
 			raise LookupError("Object is off screen, invisible or has no location")
 		return o.location
@@ -228,12 +222,12 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 		try:
 			docHandle, ID = self._getFieldIdentifierFromOffset(offset)
 		except LookupError:
-			log.debugWarning("Couldn't get NVDAObject from offset %d" % offset)
+			log.debugWarning("Couldn't get NVDAObject from offset %d" % offset)  # noqa: UP031
 			return None
 		return self.obj.getNVDAObjectFromIdentifier(docHandle, ID)
 
 	def _getOffsetsFromNVDAObjectInBuffer(self, obj):
-		docHandle, ID = self.obj.getIdentifierFromNVDAObject(obj)
+		docHandle, ID = _normalizeIdentifier(*self.obj.getIdentifierFromNVDAObject(obj))
 		return self._getOffsetsFromFieldIdentifier(docHandle, ID)
 
 	def _getOffsetsFromNVDAObject(self, obj):
@@ -257,7 +251,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 
 	def __init__(self, obj, position):
 		self.obj = obj
-		super(VirtualBufferTextInfo, self).__init__(obj, position)
+		super().__init__(obj, position)
 
 	def _getSelectionOffsets(self):
 		start = ctypes.c_int()
@@ -284,7 +278,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 	def _getTextRange(self, start, end):
 		if start == end:
 			return ""
-		return NVDAHelper.VBuf_getTextInRange(self.obj.VBufHandle, start, end, False) or ""
+		return NVDAHelper.localLib.VBuf_getTextInRange(self.obj.VBufHandle, start, end, False) or ""
 
 	def _getPlaceholderAttribute(self, attrs, placeholderAttrsKey):
 		"""Gets the placeholder attribute to be used.
@@ -336,7 +330,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 		return command
 
 	def _getFieldsInRange(self, start: int, end: int) -> textInfos.TextInfo.TextWithFieldsT:
-		text = NVDAHelper.VBuf_getTextInRange(self.obj.VBufHandle, start, end, True)
+		text = NVDAHelper.localLib.VBuf_getTextInRange(self.obj.VBufHandle, start, end, True)
 		if not text:
 			return [""]
 		commandList = XMLFormatting.XMLTextParser().parse(text)
@@ -348,7 +342,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 		]
 		return commandList
 
-	def getTextWithFields(self, formatConfig: Optional[Dict] = None) -> textInfos.TextInfo.TextWithFieldsT:
+	def getTextWithFields(self, formatConfig: dict | None = None) -> textInfos.TextInfo.TextWithFieldsT:
 		start = self._startOffset
 		end = self._endOffset
 		if start == end:
@@ -367,7 +361,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 			ctypes.byref(lineStart),
 			ctypes.byref(lineEnd),
 		)
-		word_startOffset, word_endOffset = super(VirtualBufferTextInfo, self)._getWordOffsets(offset)
+		word_startOffset, word_endOffset = super()._getWordOffsets(offset)
 		return (max(lineStart.value, word_startOffset), min(lineEnd.value, word_endOffset))
 
 	def _getLineOffsets(self, offset):
@@ -421,7 +415,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 
 		# Handle table row and column headers.
 		for axis in "row", "column":
-			attr = attrs.pop("table-%sheadercells" % axis, None)
+			attr = attrs.pop("table-%sheadercells" % axis, None)  # noqa: UP031
 			if not attr:
 				continue
 			cellIdentifiers = [identifier.split(",") for identifier in attr.split(";") if identifier]
@@ -440,7 +434,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 				except (LookupError, ValueError):
 					continue
 				textList.append(self.obj.makeTextInfo(textInfos.offsets.Offsets(start, end)).text)
-			attrs["table-%sheadertext" % axis] = "\n".join(textList)
+			attrs["table-%sheadertext" % axis] = "\n".join(textList)  # noqa: UP031
 
 		if attrs.get("role") in (controlTypes.Role.LANDMARK, controlTypes.Role.REGION):
 			attrs["alwaysReportName"] = True
@@ -457,7 +451,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 		strippedCharsFromStart = attrs.get("strippedCharsFromStart")
 		if strippedCharsFromStart is not None:
 			assert strippedCharsFromStart.isdigit(), (
-				"strippedCharsFromStart isn't a digit, %r" % strippedCharsFromStart
+				"strippedCharsFromStart isn't a digit, %r" % strippedCharsFromStart  # noqa: UP031
 			)
 			attrs["strippedCharsFromStart"] = int(strippedCharsFromStart)
 		return attrs
@@ -497,7 +491,7 @@ class VirtualBufferTextInfo(browseMode.BrowseModeDocumentTextInfo, textInfos.off
 				ctypes.byref(node),
 			)
 			return startOffset.value, endOffset.value
-		return super(VirtualBufferTextInfo, self)._getUnitOffsets(unit, offset)
+		return super()._getUnitOffsets(unit, offset)
 
 	def _get_clipboardText(self):
 		# Blocks should start on a new line, but they don't necessarily have an end of line indicator.
@@ -526,11 +520,13 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 	rootIdentifiers = weakref.WeakValueDictionary()
 
 	def __init__(self, rootNVDAObject, backendName=None):
-		super(VirtualBuffer, self).__init__(rootNVDAObject)
+		super().__init__(rootNVDAObject)
 		self.backendName = backendName
 		self.VBufHandle = None
 		self.isLoading = False
-		self.rootDocHandle, self.rootID = self.getIdentifierFromNVDAObject(self.rootNVDAObject)
+		self.rootDocHandle, self.rootID = _normalizeIdentifier(
+			*self.getIdentifierFromNVDAObject(self.rootNVDAObject),
+		)
 		self.rootIdentifiers[self.rootDocHandle, self.rootID] = self
 
 	def prepare(self):
@@ -549,7 +545,7 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 		return not self.isLoading and not self.VBufHandle
 
 	def terminate(self):
-		super(VirtualBuffer, self).terminate()
+		super().terminate()
 		if not self.VBufHandle:
 			return
 		self.unloadBuffer()
@@ -570,7 +566,8 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 		try:
 			if log.isEnabledFor(log.DEBUG):
 				startTime = time.time()
-			self.VBufHandle = NVDAHelper.localLib.VBuf_createBuffer(
+			self.VBufHandle = NVDAHelper.localLib.VBufRemote_bufferHandle_t()
+			self.VBufHandle.value = NVDAHelper.localLib.VBuf_createBuffer(
 				self.rootNVDAObject.appModule.helperLocalBindingHandle,
 				self.rootDocHandle,
 				self.rootID,
@@ -579,12 +576,12 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 			if not self.VBufHandle:
 				raise RuntimeError("Could not remotely create virtualBuffer")
 		except:  # noqa: E722
-			log.error("", exc_info=True)
+			log.error("", exc_info=True)  # noqa: G201
 			queueHandler.queueFunction(queueHandler.eventQueue, self._loadBufferDone, success=False)
 			return
 		if log.isEnabledFor(log.DEBUG):
 			log.debug(
-				"Buffer load took %.3f sec, %d chars"
+				"Buffer load took %.3f sec, %d chars"  # noqa: UP031
 				% (
 					time.time() - startTime,
 					NVDAHelper.localLib.VBuf_getTextLength(self.VBufHandle),
@@ -614,7 +611,7 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 			self.event_treeInterceptor_gainFocus()
 
 	def event_documentLoadComplete(self, obj, nextHandler):
-		if not self._hadFirstGainFocus:
+		if not self._hadFirstGainFocus:  # noqa: SIM102
 			# Any initial gainFocus events were too early to start reporting content in this buffer.
 			# Therefore as we are now alerted the document load is complete,
 			# We should handle the initial automatic say all etc.
@@ -631,14 +628,14 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 			try:
 				watchdog.cancellableExecute(
 					NVDAHelper.localLib.VBuf_destroyBuffer,
-					ctypes.byref(ctypes.c_int(self.VBufHandle)),
+					ctypes.byref(self.VBufHandle),
 				)
-			except WindowsError:
+			except OSError:
 				pass
 			self.VBufHandle = None
 
 	def isNVDAObjectPartOfLayoutTable(self, obj):
-		docHandle, ID = self.getIdentifierFromNVDAObject(obj)
+		docHandle, ID = _normalizeIdentifier(*self.getIdentifierFromNVDAObject(obj))  # noqa: RUF059
 		ID = str(ID)
 		info = self.makeTextInfo(obj)
 		info.collapse()
@@ -696,18 +693,11 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 	# Translators: the description for the refreshBuffer script on virtualBuffers.
 	script_refreshBuffer.__doc__ = _("Refreshes the document content")
 
-	@script(
-		description=_(
-			# Translators: the description for the toggleScreenLayout script on virtualBuffers.
-			"Toggles on and off if the screen layout is preserved while rendering the document content",
-		),
-		gesture="kb:NVDA+v",
-	)
-	def script_toggleScreenLayout(self, gesture):
-		config.conf["virtualBuffers"]["useScreenLayout"] = not config.conf["virtualBuffers"][
-			"useScreenLayout"
-		]
-		if config.conf["virtualBuffers"]["useScreenLayout"]:
+	def _toggleScreenLayout(self):
+		newUseScreenLayout = config.conf["virtualBuffers"]["useScreenLayout"] = not config.conf[
+			"virtualBuffers"
+		]["useScreenLayout"]
+		if newUseScreenLayout:
 			# Translators: Presented when use screen layout option is toggled.
 			ui.message(_("Use screen layout on"))
 		else:
@@ -735,7 +725,7 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 		elif direction == "up":
 			direction = VBufStorage_findDirection_up
 		else:
-			raise ValueError("unknown direction: %s" % direction)
+			raise ValueError("unknown direction: %s" % direction)  # noqa: UP031
 		while True:
 			try:
 				node = VBufRemote_nodeHandle_t()
@@ -885,7 +875,7 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 		braille.handler.handleUpdate(self)
 
 	def getControlFieldForNVDAObject(self, obj):
-		docHandle, objId = self.getIdentifierFromNVDAObject(obj)
+		docHandle, objId = _normalizeIdentifier(*self.getIdentifierFromNVDAObject(obj))  # noqa: RUF059
 		objId = str(objId)
 		info = self.makeTextInfo(obj)
 		info.collapse()
@@ -899,15 +889,15 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 		raise LookupError
 
 	def _isNVDAObjectInApplication_noWalk(self, obj):
-		inApp = super(VirtualBuffer, self)._isNVDAObjectInApplication_noWalk(obj)
+		inApp = super()._isNVDAObjectInApplication_noWalk(obj)
 		if inApp is not None:
 			return inApp
 		# If the object is in the buffer, it's definitely not in an application.
 		try:
-			docHandle, objId = self.getIdentifierFromNVDAObject(obj)
+			docHandle, objId = _normalizeIdentifier(*self.getIdentifierFromNVDAObject(obj))
 		except:  # noqa: E722
 			log.debugWarning(
-				"getIdentifierFromNVDAObject failed. " "Object probably died while walking ancestors.",
+				"getIdentifierFromNVDAObject failed. Object probably died while walking ancestors.",
 				exc_info=True,
 			)
 			return None
@@ -921,12 +911,12 @@ class VirtualBuffer(browseMode.BrowseModeDocumentTreeInterceptor):
 				objId,
 				ctypes.byref(node),
 			)
-		except WindowsError:
+		except OSError:
 			return None
 		if node:
 			return False
 		return None
 
-	__gestures = {
+	__gestures = {  # noqa: RUF012
 		"kb:NVDA+f5": "refreshBuffer",
 	}

@@ -8,7 +8,7 @@
 
 """Utilities for working with MathType."""
 
-import winreg
+import winreg  # noqa: I001
 import ctypes
 import mathPres
 
@@ -17,8 +17,7 @@ def _getDllPath():
 	with winreg.OpenKey(
 		winreg.HKEY_LOCAL_MACHINE,
 		r"SOFTWARE\Design Science\DSMT6\Directories",
-		0,
-		winreg.KEY_WOW64_32KEY | winreg.KEY_QUERY_VALUE,
+		access=winreg.KEY_WOW64_32KEY | winreg.KEY_QUERY_VALUE,
 	) as key:
 		return winreg.QueryValueEx(key, "AppSystemDir32")[0] + "\\MT6.dll"
 

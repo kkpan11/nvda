@@ -1,14 +1,10 @@
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2006-2022 NV Access Limited, Bill Dengler, Leonard de Ruijter
+# Copyright (C) 2006-2025 NV Access Limited, Bill Dengler, Leonard de Ruijter, Cyrille Bougot
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-from typing import (
-	Optional,
-	Union,
-)
 
-from comtypes import COMError
+from comtypes import COMError  # noqa: I001
 import comtypes.client
 import oleacc
 import time
@@ -18,7 +14,7 @@ import controlTypes
 from controlTypes import TextPosition
 import textInfos
 import colors
-from compoundDocuments import CompoundDocument, TreeCompoundTextInfo
+from compoundDocuments import CompoundDocument, TreeCompoundTextInfo, CompoundTextLeafTextInfo
 from NVDAObjects import NVDAObject
 from NVDAObjects.IAccessible import IAccessible, IA2TextTextInfo
 from NVDAObjects.behaviors import EditableText
@@ -28,17 +24,39 @@ import speech
 import api
 import braille
 import inputCore
+import keyboardHandler
 import languageHandler
 import ui
 import vision
 
 
-class SymphonyTextInfo(IA2TextTextInfo):
+class SymphonyUtils:
+	"""Helper class providing utility methods."""
+
+	@staticmethod
+	def is_toolbar_item(obj: NVDAObject) -> bool:
+		"""Whether the given object is part of a toolbar."""
+		parent = obj.parent
+		while parent:
+			if parent.role == controlTypes.Role.TOOLBAR:
+				return True
+			parent = parent.parent
+		return False
+
+	@staticmethod
+	def get_id(obj: NVDAObject) -> str | None:
+		"""Get value of the "id" object attribute, if set."""
+		if not hasattr(obj, "IA2Attributes"):
+			return None
+		return obj.IA2Attributes.get("id")
+
+
+class SymphonyTextInfo(IA2TextTextInfo, CompoundTextLeafTextInfo):
 	# C901 '_getFormatFieldFromLegacyAttributesString' is too complex
 	# Note: when working on _getFormatFieldFromLegacyAttributesString, look for opportunities to simplify
 	# and move logic out into smaller helper functions.
 	# This is legacy code, kept for compatibility reasons.
-	def _getFormatFieldFromLegacyAttributesString(  # noqa: C901
+	def _getFormatFieldFromLegacyAttributesString(
 		self,
 		attribsString: str,
 		offset: int,
@@ -122,7 +140,7 @@ class SymphonyTextInfo(IA2TextTextInfo):
 	def _getFormatFieldAndOffsetsFromAttributes(
 		self,
 		offset: int,
-		formatConfig: Optional[dict],
+		formatConfig: dict | None,
 		calculateOffsets: bool,
 	) -> tuple[textInfos.FormatField, tuple[int, int]]:
 		"""Get format field and offset information from either
@@ -168,7 +186,7 @@ class SymphonyTextInfo(IA2TextTextInfo):
 	def _getFormatFieldAndOffsets(
 		self,
 		offset: int,
-		formatConfig: Optional[dict],
+		formatConfig: dict | None,
 		calculateOffsets: bool = True,
 	) -> tuple[textInfos.FormatField, tuple[int, int]]:
 		formatField, (startOffset, endOffset) = self._getFormatFieldAndOffsetsFromAttributes(
@@ -211,16 +229,17 @@ class SymphonyTextInfo(IA2TextTextInfo):
 		return formatField, (startOffset, endOffset)
 
 	def _getLineOffsets(self, offset):
-		start, end = super(SymphonyTextInfo, self)._getLineOffsets(offset)
+		start, end = super()._getLineOffsets(offset)
 		if offset == 0 and start == 0 and end == 0:
 			# HACK: Symphony doesn't expose any characters at all on empty lines, but this means we don't ever fetch the list item prefix in this case.
 			# Fake a character so that the list item prefix will be spoken on empty lines.
+			# Note: Observations in LibreOffice revealed that this might no longer be necessary.
 			return (0, 1)
 		return start, end
 
 	def _getStoryLength(self):
 		# HACK: Account for the character faked in _getLineOffsets() so that move() will work.
-		return max(super(SymphonyTextInfo, self)._getStoryLength(), 1)
+		return max(super()._getStoryLength(), 1)
 
 
 class SymphonyText(IAccessible, EditableText):
@@ -233,7 +252,18 @@ class SymphonyText(IAccessible, EditableText):
 		level = self.IA2Attributes.get("heading-level")
 		if level:
 			return {"level": int(level)}
-		return super(SymphonyText, self).positionInfo
+		return super().positionInfo
+
+	def event_valueChange(self) -> None:
+		# announce new value to indicate formatting change if registered gesture
+		# triggered the change in toolbar item's value/text
+		if SymphonyDocument.isFormattingChangeAnnouncementEnabled(self):
+			message = self.IAccessibleTextObject.text(0, -1)
+			ui.message(message)
+			# disable announcement until next registered keypress enables it again
+			SymphonyDocument.announceFormattingGestureChange = False
+
+		return super().event_valueChange()
 
 
 class SymphonyTableCell(IAccessible):
@@ -242,7 +272,7 @@ class SymphonyTableCell(IAccessible):
 	TextInfo = SymphonyTextInfo
 
 	def _get_cellCoordsText(self):
-		return super(SymphonyTableCell, self).name
+		return super().name
 
 	name = None
 
@@ -250,7 +280,7 @@ class SymphonyTableCell(IAccessible):
 		return self.selectionContainer and 1 < self.selectionContainer.getSelectedItemsCount()
 
 	def _get_states(self):
-		states = super(SymphonyTableCell, self).states
+		states = super().states
 		states.discard(controlTypes.State.MULTILINE)
 		states.discard(controlTypes.State.EDITABLE)
 		if controlTypes.State.SELECTED not in states and controlTypes.State.FOCUSED in states:
@@ -300,11 +330,11 @@ class SymphonyIATableCell(SymphonyTableCell):
 			count = self.table.IAccessibleTable2Object.nSelectedCells
 			selection = self.table.IAccessibleObject.accSelection
 			enumObj = selection.QueryInterface(oleacc.IEnumVARIANT)
-			firstChild: Union[int, comtypes.client.dynamic._Dispatch]
+			firstChild: int | comtypes.client.dynamic._Dispatch
 			firstChild, _retrievedCount = enumObj.Next(1)
 			# skip over all except the last element
 			enumObj.Skip(count - 2)
-			lastChild: Union[int, comtypes.client.dynamic._Dispatch]
+			lastChild: int | comtypes.client.dynamic._Dispatch
 			lastChild, _retrieveCount = enumObj.Next(1)
 			# in LibreOffice 7.3.0, the IEnumVARIANT returns a child ID,
 			# in LibreOffice >= 7.4, it returns an IDispatch
@@ -355,16 +385,7 @@ class SymphonyButton(IAccessible):
 	def event_stateChange(self) -> None:
 		# announce new state of toggled toolbar button to indicate formatting change
 		# if registered gesture resulted in button state change
-		if (
-			SymphonyDocument.announceToolbarButtonToggle
-			and self.parent
-			and self.parent.role == controlTypes.Role.TOOLBAR
-			and time.time()
-			< (
-				SymphonyDocument.lastFormattingGestureEventTime
-				+ SymphonyDocument.GESTURE_ANNOUNCEMENT_TIMEOUT
-			)
-		):
+		if SymphonyDocument.isFormattingChangeAnnouncementEnabled(self):
 			states = self.states
 			enabled = controlTypes.State.PRESSED in states or controlTypes.State.CHECKED in states
 			# button's accessible name is the font attribute, e.g. "Bold", "Italic"
@@ -376,7 +397,7 @@ class SymphonyButton(IAccessible):
 				message = _("{textAttribute} off").format(textAttribute=self.name)
 			ui.message(message)
 			# disable announcement until next registered keypress enables it again
-			SymphonyDocument.announceToolbarButtonToggle = False
+			SymphonyDocument.announceFormattingGestureChange = False
 
 		return super().event_stateChange()
 
@@ -424,16 +445,45 @@ class SymphonyDocumentTextInfo(TreeCompoundTextInfo):
 				"cursor positioned {horizontalDistance} from left edge of page, {verticalDistance} from top edge of page",
 			).format(horizontalDistance=horizontalDistanceText, verticalDistance=verticalDistanceText)
 		except (AttributeError, KeyError):
-			return super(SymphonyDocumentTextInfo, self)._get_locationText()
+			return super()._get_locationText()
 
 
 class SymphonyDocument(CompoundDocument):
 	TextInfo = SymphonyDocumentTextInfo
 
 	# variables used for handling announcements resulting from gestures
-	GESTURE_ANNOUNCEMENT_TIMEOUT = 0.15
-	announceToolbarButtonToggle = False
-	lastFormattingGestureEventTime = 0
+	GESTURE_ANNOUNCEMENT_TIMEOUT: float = 2.0  # Seconds
+	announceFormattingGestureChange: bool = False
+	formattingGestureObjectIds: list[str] = []  # noqa: RUF012
+	lastFormattingGestureEventTime: float = 0
+
+	@staticmethod
+	def isFormattingChangeAnnouncementEnabled(obj: NVDAObject) -> bool:
+		if not SymphonyDocument.announceFormattingGestureChange:
+			return False
+
+		# don't announce if too much time has passed since last gesture
+		if time.time() > (
+			SymphonyDocument.lastFormattingGestureEventTime + SymphonyDocument.GESTURE_ANNOUNCEMENT_TIMEOUT
+		):
+			return False
+
+		# only toolbar items are of interest
+		if not SymphonyUtils.is_toolbar_item(obj):
+			return False
+
+		# If announcement is restricted to objects with specific IDs, check whether
+		# object or its parent has an ID that matches.
+		# (For editable comboboxes, the value change event is triggered for the edit
+		# that's a child of the combobox which has the corresponding ID.)
+		if (  # noqa: SIM103
+			SymphonyDocument.formattingGestureObjectIds
+			and (SymphonyUtils.get_id(obj) not in SymphonyDocument.formattingGestureObjectIds)
+			and (SymphonyUtils.get_id(obj.parent) not in SymphonyDocument.formattingGestureObjectIds)
+		):
+			return False
+
+		return True
 
 	# override base class implementation because that one assumes
 	# that the text retrieved from the text info for the text unit
@@ -471,8 +521,22 @@ class SymphonyDocument(CompoundDocument):
 
 	@script(
 		gestures=[
+			# paragraph style: Body Text
+			"kb:control+0",
+			# paragraph style: Heading 1
+			"kb:control+1",
+			# paragraph style: Heading 2
+			"kb:control+2",
+			# paragraph style: Heading 3
+			"kb:control+3",
+			# paragraph style: Heading 4
+			"kb:control+4",
+			# paragraph style: Heading 5
+			"kb:control+5",
 			# bold
 			"kb:control+b",
+			# double underline
+			"kb:control+d",
 			# italic
 			"kb:control+i",
 			# underline
@@ -489,13 +553,31 @@ class SymphonyDocument(CompoundDocument):
 			"kb:control+r",
 			# justified
 			"kb:control+j",
+			# decrease font size
+			"kb:control+[",
+			# increase font size
+			"kb:control+]",
 		],
 	)
-	def script_toggleTextAttribute(self, gesture: inputCore.InputGesture):
-		"""Reset time and enable announcement of toggled toolbar buttons.
-		See :func:`SymphonyButton.event_stateChange`
+	def script_changeTextFormatting(self, gesture: inputCore.InputGesture):
+		"""Reset time and enable announcement of newly changed state/text of toolbar
+		items related to text formatting.
+		See also :func:`SymphonyButton.event_stateChange` and
+		:func:`SymphonyText.event_valueChange`.
 		"""
-		SymphonyDocument.announceToolbarButtonToggle = True
+		SymphonyDocument.announceFormattingGestureChange = True
+
+		# changing paragraph style can imply more related formatting changes (e.g. font size, bold,...);
+		# restrict announcement to the paragraph style combobox via its ID
+		if (
+			isinstance(gesture, keyboardHandler.KeyboardInputGesture)
+			and gesture.modifierNames == ["control"]
+			and gesture.mainKeyName in ["1", "2", "3", "4", "5", "0"]
+		):
+			SymphonyDocument.formattingGestureObjectIds = ["applystyle"]
+		else:
+			SymphonyDocument.formattingGestureObjectIds = []
+
 		SymphonyDocument.lastFormattingGestureEventTime = time.time()
 		# send gesture
 		gesture.send()
@@ -517,9 +599,12 @@ class AppModule(appModuleHandler.AppModule):
 				hasattr(obj, "IAccessibleTable2Object") or hasattr(obj, "IAccessibleTableObject")
 			):
 				clsList.insert(0, SymphonyTable)
-			elif hasattr(obj, "IAccessibleTextObject"):
+			elif hasattr(obj, "IAccessibleTextObject") and role in {
+				controlTypes.Role.EDITABLETEXT,
+				controlTypes.Role.HEADING,
+			}:
 				clsList.insert(0, SymphonyText)
-			if role == controlTypes.Role.PARAGRAPH:
+			if role in {controlTypes.Role.BLOCKQUOTE, controlTypes.Role.PARAGRAPH}:
 				clsList.insert(0, SymphonyParagraph)
 
 	def event_NVDAObject_init(self, obj):
@@ -533,7 +618,7 @@ class AppModule(appModuleHandler.AppModule):
 			obj.description = None
 			obj.treeInterceptorClass = SymphonyDocument
 
-	def searchStatusBar(self, obj: NVDAObject, max_depth: int = 5) -> Optional[NVDAObject]:
+	def searchStatusBar(self, obj: NVDAObject, max_depth: int = 5) -> NVDAObject | None:
 		"""Searches for and returns the status bar object
 		if either the object itself or one of its recursive children
 		(up to the given depth) has the corresponding role."""
@@ -553,7 +638,7 @@ class AppModule(appModuleHandler.AppModule):
 				return status_bar
 		return None
 
-	def _get_statusBar(self) -> Optional[NVDAObject]:
+	def _get_statusBar(self) -> NVDAObject | None:
 		return self.searchStatusBar(api.getForegroundObject())
 
 	def getStatusBarText(self, obj: NVDAObject) -> str:

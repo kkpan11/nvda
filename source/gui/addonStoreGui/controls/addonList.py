@@ -1,11 +1,10 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2022-2023 NV Access Limited, Leonard de Ruijter
+# Copyright (C) 2022-2026 NV Access Limited, Leonard de Ruijter, Cyrille Bougot
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-from typing import (
-	List,
-	Optional,
+from typing import (  # noqa: I001
+	cast,
 )
 
 import wx
@@ -73,7 +72,7 @@ class AddonVirtualList(
 			self.AppendColumn(col.displayString, width=self.scaleSize(col.width))
 		self.Layout()
 
-	def _getListSelectionPosition(self) -> Optional[wx.Position]:
+	def _getListSelectionPosition(self) -> wx.Position | None:
 		firstSelectedIndex: int = self.GetFirstSelected()
 		if firstSelectedIndex < 0:
 			return None
@@ -83,7 +82,7 @@ class AddonVirtualList(
 	def _updateBatchContextMenuSelection(self):
 		numSelected = self.GetSelectedItemCount()
 		prevSelectedIndex = self.GetFirstSelected()
-		selectedAddons: List[AddonListItemVM] = []
+		selectedAddons: list[AddonListItemVM] = []
 		for _ in range(numSelected):
 			addon = self._addonsListVM.getAddonAtIndex(prevSelectedIndex)
 			selectedAddons.append(addon)
@@ -148,9 +147,20 @@ class AddonVirtualList(
 		return str(dataItem)
 
 	def OnColClick(self, evt: wx.ListEvent):
-		colIndex = evt.GetColumn()
-		log.debug(f"col clicked: {colIndex}")
-		self._addonsListVM.setSortField(self._addonsListVM.presentedFields[colIndex])
+		from .storeDialog import AddonStoreDialog
+
+		newColIndex = evt.GetColumn()
+		log.debug(f"col clicked: {newColIndex}")
+		parent = cast(AddonStoreDialog, self.Parent)
+		sel = parent.columnFilterCtrl.GetSelection()
+		curColIndex = sel // 2
+		curReverse = sel % 2
+		if newColIndex == curColIndex:
+			newReverse = 0 if curReverse else 1
+		else:
+			newReverse = 0
+		self._addonsListVM.setSortField(self._addonsListVM.sortableFields[newColIndex], newReverse)
+		parent.columnFilterCtrl.SetSelection(newColIndex * 2 + newReverse)
 
 	def _doRefresh(self):
 		with guiHelper.autoThaw(self):

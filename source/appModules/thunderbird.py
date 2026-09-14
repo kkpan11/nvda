@@ -6,16 +6,31 @@
 
 """App module for Thunderbird email client."""
 
-import appModuleHandler
+import appModuleHandler  # noqa: I001
 import controlTypes
 import api
 import speech
 import winUser
 from NVDAObjects import NVDAObject
-from typing import Callable
+from collections.abc import Callable
 
 
 class AppModule(appModuleHandler.AppModule):
+	def _isPopupMenuItem(self, obj: NVDAObject):
+		attributes = getattr(obj, "IA2Attributes", None)
+
+		if attributes and "class" in attributes:
+			tag = attributes["tag"]
+			classes = attributes["class"].split()
+			return tag == "div" and "popup-menuitem" in classes
+
+		return False
+
+	def event_NVDAObject_init(self, obj: NVDAObject):
+		if obj.role == controlTypes.Role.SECTION and not obj.name and self._isPopupMenuItem(obj):
+			obj.role = controlTypes.Role.MENUITEM
+			obj.name = obj.IAccessibleObject.accChild(1).accName(0)
+
 	def event_gainFocus(self, obj, nextHandler):
 		if (
 			obj.role == controlTypes.Role.DOCUMENT

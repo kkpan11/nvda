@@ -1,15 +1,8 @@
 /*
-This file is a part of the NVDA project.
-URL: http://www.nvda-project.org/
-Copyright 2023 James Teh.
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License version 2.0, as published by
-    the Free Software Foundation.
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
-This license can be found at:
-http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
+A part of NonVisual Desktop Access (NVDA)
+Copyright (C) 2023-2025 NV Access Limited, James Teh.
+This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 */
 
 #include <thread>
@@ -24,6 +17,7 @@ http://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 #include <mmdeviceapi.h>
 #include <common/log.h>
 #include <random>
+#include "silenceDetect.h"
 
 /**
  * Support for audio playback using WASAPI.
@@ -43,6 +37,9 @@ const IID IID_IAudioRenderClient = __uuidof(IAudioRenderClient);
 const IID IID_IAudioClock = __uuidof(IAudioClock);
 const IID IID_IMMNotificationClient = __uuidof(IMMNotificationClient);
 const IID IID_IAudioStreamVolume = __uuidof(IAudioStreamVolume);
+const IID IID_IAudioSessionManager2 = __uuidof(IAudioSessionManager2);
+const IID IID_IAudioSessionControl2 = __uuidof(IAudioSessionControl2);
+const IID IID_IMMEndpoint = __uuidof(IMMEndpoint);
 
 /**
  * C++ RAII class to manage the lifecycle of a standard Windows HANDLE closed
@@ -165,9 +162,9 @@ class WasapiPlayer {
 
 	/**
 	 * Constructor.
-	 * Specify an empty (not null) deviceName to use the default device.
+	 * Specify an empty (not null) endpointId to use the default device.
 	 */
-	WasapiPlayer(wchar_t* deviceName, WAVEFORMATEX format,
+	WasapiPlayer(wchar_t* endpointId, WAVEFORMATEX format,
 		ChunkCompletedCallback callback);
 
 	/**
@@ -191,12 +188,15 @@ class WasapiPlayer {
 	HRESULT resume();
 	HRESULT setChannelVolume(unsigned int channel, float level);
 
+	void startTrimmingLeadingSilence(bool start);
+
 	private:
 	void maybeFireCallback();
 
 	// Reset our state due to being stopped. This runs on the feeder thread
 	// rather than on the thread which called stop() because writing to a vector
-	// isn't thread safe.
+	// isn't thread safe. We also reset the stream here because this can't be done
+	// in stop() if the feeder thread is currently writing to the buffer.
 	void completeStop();
 
 	// Convert frames into ms.
@@ -214,6 +214,8 @@ class WasapiPlayer {
 	HRESULT getPreferredDevice(CComPtr<IMMDevice>& preferredDevice);
 	bool didPreferredDeviceBecomeAvailable();
 
+	HRESULT disableCommunicationDucking(IMMDevice* device);
+
 	enum class PlayState {
 		stopped,
 		playing,
@@ -225,7 +227,7 @@ class WasapiPlayer {
 	CComPtr<IAudioClock> clock;
 	// The maximum number of frames that will fit in the buffer.
 	UINT32 bufferFrames;
-	std::wstring deviceName;
+	std::wstring endpointId;
 	WAVEFORMATEX format;
 	ChunkCompletedCallback callback;
 	PlayState playState = PlayState::stopped;
@@ -240,11 +242,12 @@ class WasapiPlayer {
 	unsigned int defaultDeviceChangeCount;
 	unsigned int deviceStateChangeCount;
 	bool isUsingPreferredDevice = false;
+	bool isTrimmingLeadingSilence = false;
 };
 
-WasapiPlayer::WasapiPlayer(wchar_t* deviceName, WAVEFORMATEX format,
+WasapiPlayer::WasapiPlayer(wchar_t* endpointId, WAVEFORMATEX format,
 	ChunkCompletedCallback callback)
-: deviceName(deviceName), format(format), callback(callback) {
+: endpointId(endpointId), format(format), callback(callback) {
 	wakeEvent = CreateEvent(nullptr, false, false, nullptr);
 }
 
@@ -262,7 +265,7 @@ HRESULT WasapiPlayer::open(bool force) {
 	}
 	CComPtr<IMMDevice> device;
 	isUsingPreferredDevice = false;
-	if (deviceName.empty()) {
+	if (endpointId.empty()) {
 		hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
 	} else {
 		hr = getPreferredDevice(device);
@@ -303,6 +306,11 @@ HRESULT WasapiPlayer::open(bool force) {
 		return hr;
 	}
 	playState = PlayState::stopped;
+	hr = disableCommunicationDucking(device);
+	if (FAILED(hr)) {
+		// Gracefully ignore failure, as disabling ducking isn't critical.
+		LOG_DEBUGWARNING(L"Couldn't disable communication ducking: " << hr);
+	}
 	return S_OK;
 }
 
@@ -331,6 +339,32 @@ HRESULT WasapiPlayer::feed(unsigned char* data, unsigned int size,
 		sentFrames = 0;
 		return true;
 	};
+
+	bool shouldInsertSilentFrame = false;
+	if (isTrimmingLeadingSilence && data && size > 0) {
+		size_t silenceSize = SilenceDetect::getLeadingSilenceSize(&format, data, size);
+		if (silenceSize >= size) {
+			// The whole chunk is silence. Continue checking for silence in the next chunk.
+			// We cannot just skip the whole chunk, however,
+			// because then the rest of this function will not perform some tasks,
+			// such as opening the device or checking for callbacks.
+			// Add one silent frame to be played, so those things work as usual.
+			shouldInsertSilentFrame = true;
+			remainingFrames = 1;
+		} else {
+			// Silence ends in this chunk. Skip the silence and continue.
+			data += silenceSize;
+			size -= (unsigned int)silenceSize;
+			remainingFrames = size / format.nBlockAlign;
+			isTrimmingLeadingSilence = false;  // Stop checking for silence
+
+			// Insert one silent frame before the trimmed audio in this chunk.
+			// Not doing so may cause the beginning of the audio to be chopped off.
+			// See: https://github.com/nvaccess/nvda/discussions/17697
+			shouldInsertSilentFrame = true;
+			remainingFrames++;
+		}
+	}
 
 	while (remainingFrames > 0) {
 		UINT32 paddingFrames;
@@ -380,13 +414,26 @@ HRESULT WasapiPlayer::feed(unsigned char* data, unsigned int size,
 			}
 		}
 		// We might have more frames than will fit in the buffer. Send what we can.
+		// If we need to insert a silent frame, the frame counts towards the total frame count,
+		// but does not count towards the total byte count, as it's not in the provided data buffer.
 		const UINT32 sendFrames = std::min(remainingFrames,
 			bufferFrames - paddingFrames);
-		const UINT32 sendBytes = sendFrames * format.nBlockAlign;
+		const UINT32 sendBytes = (sendFrames - (shouldInsertSilentFrame ? 1 : 0))
+			* format.nBlockAlign;
 		BYTE* buffer;
 		hr = render->GetBuffer(sendFrames, &buffer);
 		if (FAILED(hr)) {
 			return hr;
+		}
+		if (shouldInsertSilentFrame) {
+			// If needed, insert one frame of silence at the beginning
+			if (format.wFormatTag == WAVE_FORMAT_PCM && format.wBitsPerSample == 8) {
+				memset(buffer, 0x80, format.nBlockAlign);
+			} else {
+				memset(buffer, 0, format.nBlockAlign);
+			}
+			buffer += format.nBlockAlign;
+			shouldInsertSilentFrame = false;
 		}
 		if (data) {
 			memcpy(buffer, data, sendBytes);
@@ -482,40 +529,39 @@ HRESULT WasapiPlayer::getPreferredDevice(CComPtr<IMMDevice>& preferredDevice) {
 	if (FAILED(hr)) {
 		return hr;
 	}
-	CComPtr<IMMDeviceCollection> devices;
-	hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &devices);
+	CComPtr<IMMDevice> device;
+	hr = enumerator->GetDevice(endpointId.c_str(), &device);
 	if (FAILED(hr)) {
 		return hr;
 	}
-	UINT count = 0;
-	devices->GetCount(&count);
-	for (UINT d = 0; d < count; ++d) {
-		CComPtr<IMMDevice> device;
-		hr = devices->Item(d, &device);
-		if (FAILED(hr)) {
-			return hr;
-		}
-		CComPtr<IPropertyStore> props;
-		hr = device->OpenPropertyStore(STGM_READ, &props);
-		if (FAILED(hr)) {
-			return hr;
-		}
-		PROPVARIANT val;
-		hr = props->GetValue(PKEY_Device_FriendlyName, &val);
-		if (FAILED(hr)) {
-			return hr;
-		}
-		// WinMM device names are truncated to MAXPNAMELEN characters, including the
-		// null terminator.
-		constexpr size_t MAX_CHARS = MAXPNAMELEN - 1;
-		if (wcsncmp(val.pwszVal, deviceName.c_str(), MAX_CHARS) == 0) {
-			PropVariantClear(&val);
-			preferredDevice = std::move(device);
-			return S_OK;
-		}
-		PropVariantClear(&val);
+
+	// We only want to use the device if it is plugged in and enabled.
+	DWORD state;
+	hr = device->GetState(&state);
+	if (FAILED(hr)) {
+		return hr;
+	} else if (state != DEVICE_STATE_ACTIVE) {
+		return E_NOTFOUND;
 	}
-	return E_NOTFOUND;
+
+	// We only want to use the device if it is an output device.
+	IMMEndpoint* endpoint;
+	hr = device->QueryInterface(IID_IMMEndpoint, (void**)&endpoint);
+	if (FAILED(hr)) {
+		return hr;
+	}
+	EDataFlow dataFlow;
+	hr = endpoint->GetDataFlow(&dataFlow);
+	if (FAILED(hr)) {
+		return hr;
+	} else if (dataFlow != eRender) {
+		return E_NOTFOUND;
+	}
+	preferredDevice = std::move(device);
+	endpoint->Release();
+	device.Release();
+	enumerator.Release();
+	return S_OK;
 }
 
 bool WasapiPlayer::didPreferredDeviceBecomeAvailable() {
@@ -523,7 +569,7 @@ bool WasapiPlayer::didPreferredDeviceBecomeAvailable() {
 		// We're already using the preferred device.
 		isUsingPreferredDevice ||
 		// A preferred device was not specified.
-		deviceName.empty() ||
+		endpointId.empty() ||
 		// A device hasn't recently changed state.
 		deviceStateChangeCount == notificationClient->getDeviceStateChangeCount()
 	) {
@@ -534,22 +580,21 @@ bool WasapiPlayer::didPreferredDeviceBecomeAvailable() {
 }
 
 HRESULT WasapiPlayer::stop() {
-	playState = PlayState::stopping;
 	HRESULT hr = client->Stop();
+	// It's important that we set playState *after*
+	// calling client->Stop() because otherwise, the feeder thread might see the
+	// playState change and call client->Reset() before client->Stop() runs,
+	// causing AUDCLNT_E_NOT_STOPPED.
+	playState = PlayState::stopping;
 	// If the device has been invalidated, it has already stopped. Just ignore
 	// this and behave as if we were successful to avoid a cascade of breakage.
 	// feed() will attempt to reopen the device next time it is called.
 	if (
 		hr != AUDCLNT_E_DEVICE_INVALIDATED
 		&& hr != AUDCLNT_E_NOT_INITIALIZED
+		&& FAILED(hr)
 	) {
-		if (FAILED(hr)) {
-			return hr;
-		}
-		hr = client->Reset();
-		if (FAILED(hr)) {
-			return hr;
-		}
+		return hr;
 	}
 	// If there is a feed/sync call waiting, wake it up so it can immediately
 	// return to the caller.
@@ -558,6 +603,14 @@ HRESULT WasapiPlayer::stop() {
 }
 
 void WasapiPlayer::completeStop() {
+	HRESULT hr = client->Reset();
+	if (FAILED(hr)) {
+		// We must not use LOG_ERROR here because that plays a sound and we might be
+		// in the middle of stopping our sound player.
+		LOG_DEBUGWARNING(L"Couldn't reset stream: " << hr);
+		// We deliberately continue here. If Reset failed, the stream is probably
+		// already cleared or unusable anyway. We should always reset our state.
+	}
 	nextFeedId = 0;
 	sentFrames = 0;
 	feedEnds.clear();
@@ -634,6 +687,33 @@ HRESULT WasapiPlayer::setChannelVolume(unsigned int channel, float level) {
 	return volume->SetChannelVolume(channel, level);
 }
 
+void WasapiPlayer::startTrimmingLeadingSilence(bool start) {
+	isTrimmingLeadingSilence = start;
+}
+
+HRESULT WasapiPlayer::disableCommunicationDucking(IMMDevice* device) {
+	// Disable the default ducking experience used when a communication audio
+	// session is active, as we never want NVDA's audio to be ducked.
+	// https://learn.microsoft.com/en-us/windows/win32/coreaudio/stream-attenuation
+	// https://learn.microsoft.com/en-us/windows/win32/coreaudio/disabling-the-ducking-experience
+	CComPtr<IAudioSessionManager2> manager;
+	HRESULT hr = device->Activate(IID_IAudioSessionManager2, CLSCTX_ALL, nullptr,
+		(void**)&manager);
+	if (FAILED(hr)) {
+		return hr;
+	}
+	CComPtr<IAudioSessionControl> control;
+	hr = manager->GetAudioSessionControl(nullptr, 0, &control);
+	if (FAILED(hr)) {
+		return hr;
+	}
+	CComQIPtr<IAudioSessionControl2, &IID_IAudioSessionControl2> control2(control);
+	if (!control2) {
+		return E_NOINTERFACE;
+	}
+	return control2->SetDuckingPreference(TRUE);
+}
+
 /**
  * Asynchronously play silence for requested durations.
  * Silence is played in a background thread. The duration can be adjusted from
@@ -641,7 +721,7 @@ HRESULT WasapiPlayer::setChannelVolume(unsigned int channel, float level) {
  */
 class SilencePlayer {
 	public:
-	SilencePlayer(wchar_t* deviceName);
+	SilencePlayer(wchar_t* endpointId);
 	HRESULT init();
 	// Play silence for the specified duration.
 	void playFor(DWORD ms, float volume);
@@ -666,8 +746,8 @@ class SilencePlayer {
 	std::vector<INT16> whiteNoiseData;
 };
 
-SilencePlayer::SilencePlayer(wchar_t* deviceName):
-player(deviceName, getFormat(), nullptr),
+SilencePlayer::SilencePlayer(wchar_t* endpointId):
+player(endpointId, getFormat(), nullptr),
 whiteNoiseData(
 	SILENCE_BYTES  / (
 		sizeof(INT16) / sizeof(unsigned char)
@@ -693,12 +773,12 @@ void SilencePlayer::generateWhiteNoise(float volume) {
 	if (volume == 0) {
 		return;
 	}
-	UINT32 n = whiteNoiseData.size();
+	size_t n = whiteNoiseData.size();
 	const double mean = 0.0;
 	const double stddev = volume * 256;
 	std::default_random_engine generator;
 	std::normal_distribution<double> dist(mean, stddev);
-	for (UINT32 i = 0; i < n; i++) {
+	for (size_t i = 0; i < n; i++) {
 		whiteNoiseData[i] = (INT16)dist(generator);
 	}
 }
@@ -759,10 +839,10 @@ void SilencePlayer::terminate() {
  * WasapiPlayer or SilencePlayer, with the exception of wasPlay_startup.
  */
 
-WasapiPlayer* wasPlay_create(wchar_t* deviceName, WAVEFORMATEX format,
+WasapiPlayer* wasPlay_create(wchar_t* endpointId, WAVEFORMATEX format,
 	WasapiPlayer::ChunkCompletedCallback callback
 ) {
-	return new WasapiPlayer(deviceName, format, callback);
+	return new WasapiPlayer(endpointId, format, callback);
 }
 
 void wasPlay_destroy(WasapiPlayer* player) {
@@ -807,6 +887,10 @@ HRESULT wasPlay_setChannelVolume(
 	return player->setChannelVolume(channel, level);
 }
 
+void wasPlay_startTrimmingLeadingSilence(WasapiPlayer* player, bool start) {
+	player->startTrimmingLeadingSilence(start);
+}
+
 /**
  * This must be called once per session at startup before wasPlay_create is
  * called.
@@ -823,9 +907,9 @@ HRESULT wasPlay_startup() {
 
 SilencePlayer* silence = nullptr;
 
-HRESULT wasSilence_init(wchar_t* deviceName) {
+HRESULT wasSilence_init(wchar_t* endpointId) {
 	assert(!silence);
-	silence = new SilencePlayer(deviceName);
+	silence = new SilencePlayer(endpointId);
 	return silence->init();
 }
 

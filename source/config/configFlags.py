@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2022-2024 NV Access Limited, Cyrille Bougot
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
+# Copyright (C) 2022-2026 NV Access Limited, Cyrille Bougot, Cary-rowen
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 """Flags used to define the possible values for an option in the configuration.
 Use Flag.MEMBER.value to set a new value or compare with an option in the config;
@@ -11,12 +11,18 @@ When creating new parameter options, consider using F{FeatureFlag} which explici
 the default value.
 """
 
-from enum import unique
+from typing import TYPE_CHECKING  # noqa: I001
+from enum import unique, verify, CONTINUOUS
+from logHandler import Logger
 from utils.displayString import (
+	DisplayStringFlag,
 	DisplayStringIntEnum,
 	DisplayStringStrEnum,
 	DisplayStringIntFlag,
 )
+
+if TYPE_CHECKING:
+	import _remoteClient
 
 
 @unique
@@ -42,6 +48,30 @@ class NVDAKey(DisplayStringIntFlag):
 			NVDAKey.CAPS_LOCK: localizedKeyLabels["capslock"],
 			NVDAKey.NUMPAD_INSERT: localizedKeyLabels["numpadinsert"],
 			NVDAKey.EXTENDED_INSERT: localizedKeyLabels["insert"],
+		}
+
+
+@unique
+class TypingEcho(DisplayStringIntEnum):
+	"""Enumeration containing the possible config values for typing echo (characters and words).
+
+	Use TypingEcho.MEMBER.value to compare with the config;
+	use TypingEcho.MEMBER.displayString in the UI for a translatable description of this member.
+	"""
+
+	OFF = 0
+	EDIT_CONTROLS = 1
+	ALWAYS = 2
+
+	@property
+	def _displayStringLabels(self):
+		return {
+			# Translators: One of the choices for typing echo in keyboard settings
+			TypingEcho.OFF: _("Off"),
+			# Translators: One of the choices for typing echo in keyboard settings
+			TypingEcho.EDIT_CONTROLS: _("Only in edit controls"),
+			# Translators: One of the choices for typing echo in keyboard settings
+			TypingEcho.ALWAYS: _("Always"),
 		}
 
 
@@ -152,6 +182,42 @@ class ReportLineIndentation(DisplayStringIntEnum):
 
 
 @unique
+class ReportSpellingErrors(DisplayStringIntFlag):
+	"""IntFlag enumeration containing the possible config values to report spelling errors while reading.
+
+	Use ReportSpellingErrors.MEMBER.value to compare with the config;
+	the config stores a bitwise combination of zero, one or more of these values.
+	Use ReportSpellingErrors.MEMBER.displayString in the UI for a translatable description of this member.
+	"""
+
+	OFF = 0b0
+	SPEECH = 0b1
+	SOUND = 0b10
+	SPEECH_AND_SOUND = SPEECH | SOUND
+	BRAILLE = 0b100
+
+	@property
+	def _displayStringLabels(self) -> dict["ReportSpellingErrors", str]:
+		return {
+			# Translators: A value reported by the cycle script defining how spelling errors are reported.
+			ReportSpellingErrors.OFF: pgettext("reportSpellingErrorsSetting", "Off"),
+			# Translators: A value reported by the cycle script defining how spelling errors are reported, also used
+			# as choice in a checklist box in the document formatting dialog to report spelling errors with speech.
+			ReportSpellingErrors.SPEECH: pgettext("reportSpellingErrorsSetting", "Speech"),
+			# Translators: A value reported by the cycle script defining how spelling errors are reported, also used
+			# as choice in a checklist box in the document formatting dialog to report spelling errors with a sound.
+			ReportSpellingErrors.SOUND: pgettext("reportSpellingErrorsSetting", "Sound"),
+			ReportSpellingErrors.SPEECH_AND_SOUND: pgettext(
+				"reportSpellingErrorsSetting",
+				# Translators: A value reported by the cycle script defining how spelling errors are reported.
+				"Speech and sound",
+			),
+			# Translators: A value used as choice in a checklist box in the document formatting dialog to report spelling errors in braille.
+			ReportSpellingErrors.BRAILLE: pgettext("reportSpellingErrorsSetting", "Braille"),
+		}
+
+
+@unique
 class ReportTableHeaders(DisplayStringIntEnum):
 	"""Enumeration containing the possible config values to report table headers.
 
@@ -211,8 +277,7 @@ class ReportCellBorders(DisplayStringIntEnum):
 
 class AddonsAutomaticUpdate(DisplayStringStrEnum):
 	NOTIFY = "notify"
-	# TODO: uncomment when implementing #3208
-	# UPDATE = "update"
+	UPDATE = "update"
 	DISABLED = "disabled"
 
 	@property
@@ -221,7 +286,8 @@ class AddonsAutomaticUpdate(DisplayStringStrEnum):
 			# Translators: This is a label for the automatic update behaviour for add-ons.
 			# It will notify the user when updates are available.
 			self.NOTIFY: _("Notify"),
-			# self.UPDATE: _("Update Automatically"),
+			# Translators: This is a label for the automatic update behaviour for add-ons.
+			self.UPDATE: _("Update Automatically"),
 			# Translators: This is a label for the automatic update behaviour for add-ons.
 			self.DISABLED: _("Disabled"),
 		}
@@ -269,4 +335,136 @@ class ParagraphStartMarker(DisplayStringStrEnum):
 			# Pilcrow is a symbol also known as "paragraph symbol" or "paragraph marker".
 			# Ensure this is consistent with other strings with the context "paragraphMarker".
 			self.PILCROW: pgettext("paragraphMarker", "Pilcrow (¶)"),
+		}
+
+
+class ReportNotSupportedLanguage(DisplayStringStrEnum):
+	SPEECH = "speech"
+	BEEP = "beep"
+	OFF = "off"
+
+	@property
+	def _displayStringLabels(self) -> dict["ReportNotSupportedLanguage", str]:
+		return {
+			# Translators: A label for an option to report when the language of the text being read is not supported by the current synthesizer.
+			self.SPEECH: pgettext("reportLanguage", "Speech"),
+			# Translators: A label for an option to report when the language of the text being read is not supported by the current synthesizer.
+			self.BEEP: pgettext("reportLanguage", "Beep"),
+			# Translators: A label for an option to report when the language of the text being read is not supported by the current synthesizer.
+			self.OFF: pgettext("reportLanguage", "Off"),
+		}
+
+
+@verify(CONTINUOUS)
+class RemoteConnectionMode(DisplayStringIntEnum):
+	"""Enumeration containing the possible remote connection modes (roles for connected clients).
+
+	Use RemoteConnectionMode.MEMBER.value to compare with the config;
+	use RemoteConnectionMode.MEMBER.displayString in the UI for a translatable description of this member.
+
+	Note: This datatype has been chosen as it may be desireable to implement further roles in future.
+	For instance, an "observer" role, which is neither controlling or controlled, but which allows the user to listen to the other computers in the channel.
+	"""
+
+	FOLLOWER = 0
+	LEADER = 1
+
+	@property
+	def _displayStringLabels(self):
+		return {
+			# Translators: Option that allows this computer to be controlled by the remote computer.
+			RemoteConnectionMode.FOLLOWER: pgettext("remote", "Allow this computer to be controlled"),
+			# Translators: Option that allows this computer to control the remote computer.
+			RemoteConnectionMode.LEADER: pgettext("remote", "Control another computer"),
+		}
+
+	def toConnectionMode(self) -> "_remoteClient.connectionInfo.ConnectionMode":
+		from _remoteClient.connectionInfo import ConnectionMode
+
+		match self:
+			case RemoteConnectionMode.LEADER:
+				return ConnectionMode.LEADER
+			case RemoteConnectionMode.FOLLOWER:
+				return ConnectionMode.FOLLOWER
+
+
+@verify(CONTINUOUS)
+class RemoteServerType(DisplayStringFlag):
+	"""Enumeration containing the possible types of Remote relay server.
+
+	Use RemoteServerType.MEMBER.value to compare with the config;
+	use RemoteServerType.MEMBER.displayString in the UI for a translatable description of this member.
+	"""
+
+	EXISTING = False
+	LOCAL = True
+
+	@property
+	def _displayStringLabels(self):
+		return {
+			# Translators: Use an existing Remote control server
+			RemoteServerType.EXISTING: pgettext("remote", "Use existing"),
+			# Translators: Use NVDA as the Remote control server
+			RemoteServerType.LOCAL: pgettext("remote", "Host locally"),
+		}
+
+
+class LoggingLevel(DisplayStringIntEnum):
+	"""Enumeration containing the possible logging levels.
+
+	Use LoggingLevel.MEMBER.value to compare with the config;
+	use LoggingLevel.MEMBER.displayString in the UI for a translatable description of this member.
+	"""
+
+	OFF = Logger.OFF
+	INFO = Logger.INFO
+	DEBUGWARNING = Logger.DEBUGWARNING
+	IO = Logger.IO
+	DEBUG = Logger.DEBUG
+	DEBUG_UNREDACTED = Logger.DEBUG_UNREDACTED
+
+	@property
+	def _displayStringLabels(self) -> dict[int, str]:
+		return {
+			# Translators: One of the log levels of NVDA (the disabled mode turns off logging completely).
+			self.OFF: _("disabled"),
+			# Translators: One of the log levels of NVDA (the info mode shows info as NVDA runs).
+			self.INFO: _("info"),
+			# Translators: One of the log levels of NVDA (the debug warning shows debugging messages and warnings as NVDA runs).
+			self.DEBUGWARNING: _("debug warning"),
+			# Translators: One of the log levels of NVDA (the input/output shows keyboard commands and/or braille commands as well as speech and/or braille output of NVDA).
+			self.IO: _("input/output"),
+			# Translators: One of the log levels of NVDA (the debug mode shows debug messages as NVDA runs).
+			self.DEBUG: _("debug"),
+			# Translators: One of the log levels of NVDA (the "debug (unredacted)" mode mode logs debug messages
+			# without redacting secrets).
+			self.DEBUG_UNREDACTED: _("debug (unredacted)"),
+		}
+
+
+@unique
+class PlayErrorSound(DisplayStringIntEnum):
+	"""Enumeration containing the possible config values to play a sound when an error is logged, depending on
+	NVDA version type.
+
+	Use PlayErrorSound.MEMBER.value to compare with the config;
+	use PlayErrorSound.MEMBER.displayString in the UI for a translatable description of this member.
+	"""
+
+	ONLY_IN_TEST_VERSIONS = 0
+	YES = 1
+	NO = 2
+
+	@property
+	def _displayStringLabels(self):
+		return {
+			PlayErrorSound.ONLY_IN_TEST_VERSIONS: pgettext(
+				"advanced.playErrorSound",
+				# Translators: Label for a value in the Play a sound for logged errors combobox, in the Advanced settings.
+				"Only in NVDA test versions",
+			),
+			# Translators: Label for a value in the Play a sound for logged errors combobox, in the Advanced settings.
+			PlayErrorSound.YES: pgettext("advanced.playErrorSound", "Yes"),
+			# Translators: Label for a value in the Play a sound for logged errors combobox, in the Advanced settings.
+			PlayErrorSound.NO: pgettext("advanced.playErrorSound", "No"),
 		}

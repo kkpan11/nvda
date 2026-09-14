@@ -9,9 +9,8 @@ Kept here so they can be re-used without having to worry about circular imports.
 """
 
 import enum
-from typing import Tuple
 
-IAccessibleObjectIdentifierType = Tuple[
+IAccessibleObjectIdentifierType = tuple[
 	int,  # windowHandle
 	int,  # objectID
 	int,  # childID
@@ -29,3 +28,4 @@ class RelationType(str, enum.Enum):
 	CONTROLLER_FOR = "controllerFor"
 	ERROR = "error"
 	ERROR_FOR = "errorFor"
+	LABELLED_BY = "labelledBy"

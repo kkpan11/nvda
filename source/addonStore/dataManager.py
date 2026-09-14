@@ -1,9 +1,9 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2022-2024 NV Access Limited
+# Copyright (C) 2022-2025 NV Access Limited
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-from copy import deepcopy
+from copy import deepcopy  # noqa: I001
 import json
 import os
 import pathlib
@@ -11,8 +11,6 @@ import threading
 from typing import (
 	TYPE_CHECKING,
 	Optional,
-	Set,
-	Tuple,
 )
 
 import requests
@@ -37,21 +35,23 @@ from .models.addon import (
 	_createStoreCollectionFromJson,
 )
 from .models.channel import Channel
-from .models.status import AvailableAddonStatus, getStatus, _StatusFilterKey
+from .models.status import AvailableAddonStatus, _canUpdateAddon, getStatus, _StatusFilterKey
 from .network import (
 	_getCurrentApiVersionForURL,
 	_getAddonStoreURL,
 	_getCacheHashURL,
 	_LATEST_API_VER,
 )
+from .settings import _AddonStoreSettings
+
 
 if TYPE_CHECKING:
-	from addonHandler import Addon as AddonHandlerModel  # noqa: F401
+	from addonHandler import Addon as AddonHandlerModel  # noqa: I001
 
 	# AddonGUICollectionT must only be imported when TYPE_CHECKING
-	from .models.addon import AddonGUICollectionT, _AddonGUIModel, _AddonStoreModel  # noqa: F401
-	from gui.addonStoreGui.viewModels.addonList import AddonListItemVM  # noqa: F401
-	from gui.message import DisplayableError  # noqa: F401
+	from .models.addon import AddonGUICollectionT, _AddonGUIModel, _AddonStoreModel
+	from gui.addonStoreGui.viewModels.addonList import AddonListItemVM
+	from gui.message import DisplayableError
 
 
 addonDataManager: Optional["_DataManager"] = None
@@ -80,8 +80,8 @@ def terminate():
 class _DataManager:
 	_cacheLatestFilename: str = "_cachedLatestAddons.json"
 	_cacheCompatibleFilename: str = "_cachedCompatibleAddons.json"
-	_downloadsPendingInstall: Set[Tuple["AddonListItemVM[_AddonStoreModel]", os.PathLike]] = set()
-	_downloadsPendingCompletion: Set["AddonListItemVM[_AddonStoreModel]"] = set()
+	_downloadsPendingInstall: set[tuple["AddonListItemVM[_AddonStoreModel]", os.PathLike]] = set()  # noqa: RUF012
+	_downloadsPendingCompletion: set["AddonListItemVM[_AddonStoreModel]"] = set()  # noqa: RUF012
 
 	def __init__(self):
 		self._lang = languageHandler.getLanguage()
@@ -98,6 +98,7 @@ class _DataManager:
 			pathlib.Path(WritePaths.addonStoreDir).mkdir(parents=True, exist_ok=True)
 			pathlib.Path(self._installedAddonDataCacheDir).mkdir(parents=True, exist_ok=True)
 
+		self.storeSettings = _AddonStoreSettings()
 		self._latestAddonCache = self._getCachedAddonData(self._cacheLatestFile)
 		self._compatibleAddonCache = self._getCachedAddonData(self._cacheCompatibleFile)
 		self._installedAddonsCache = _InstalledAddonsCache()
@@ -110,12 +111,14 @@ class _DataManager:
 		self._initialiseAvailableAddonsThread.start()
 
 	def terminate(self):
+		if NVDAState.shouldWriteToDisk():
+			self.storeSettings.save()
 		if self._initialiseAvailableAddonsThread.is_alive():
 			self._initialiseAvailableAddonsThread.join(timeout=1)
 		if self._initialiseAvailableAddonsThread.is_alive():
 			log.debugWarning("initialiseAvailableAddons thread did not terminate immediately")
 
-	def _getLatestAddonsDataForVersion(self, apiVersion: str) -> Optional[bytes]:
+	def _getLatestAddonsDataForVersion(self, apiVersion: str) -> bytes | None:
 		url = _getAddonStoreURL(self._preferredChannel, self._lang, apiVersion)
 		try:
 			log.debug(f"Fetching add-on data from {url}")
@@ -125,13 +128,12 @@ class _DataManager:
 			return None
 		if response.status_code != requests.codes.OK:
 			log.error(
-				f"Unable to get data from API ({url}),"
-				f" response ({response.status_code}): {response.content}",
+				f"Unable to get data from API ({url}), response ({response.status_code}): {response.content}",
 			)
 			return None
 		return response.content
 
-	def _getCacheHash(self) -> Optional[str]:
+	def _getCacheHash(self) -> str | None:
 		url = _getCacheHashURL()
 		try:
 			log.debug(f"Fetching add-on data from {url}")
@@ -141,14 +143,13 @@ class _DataManager:
 			return None
 		if response.status_code != requests.codes.OK:
 			log.error(
-				f"Unable to get data from API ({url}),"
-				f" response ({response.status_code}): {response.content}",
+				f"Unable to get data from API ({url}), response ({response.status_code}): {response.content}",
 			)
 			return None
 		cacheHash = response.json()
 		return cacheHash
 
-	def _cacheCompatibleAddons(self, addonData: str, cacheHash: Optional[str]):
+	def _cacheCompatibleAddons(self, addonData: str, cacheHash: str | None):
 		if not NVDAState.shouldWriteToDisk():
 			return
 		if not addonData or not cacheHash:
@@ -162,7 +163,7 @@ class _DataManager:
 		with open(self._cacheCompatibleFile, "w", encoding="utf-8") as cacheFile:
 			json.dump(cacheData, cacheFile, ensure_ascii=False)
 
-	def _cacheLatestAddons(self, addonData: str, cacheHash: Optional[str]):
+	def _cacheLatestAddons(self, addonData: str, cacheHash: str | None):
 		if not NVDAState.shouldWriteToDisk():
 			return
 		if not addonData or not cacheHash:
@@ -176,7 +177,7 @@ class _DataManager:
 		with open(self._cacheLatestFile, "w", encoding="utf-8") as cacheFile:
 			json.dump(cacheData, cacheFile, ensure_ascii=False)
 
-	def _getCachedAddonData(self, cacheFilePath: str) -> Optional[CachedAddonsModel]:
+	def _getCachedAddonData(self, cacheFilePath: str) -> CachedAddonsModel | None:
 		if not os.path.exists(cacheFilePath):
 			return None
 		try:
@@ -207,6 +208,18 @@ class _DataManager:
 
 	# Translators: A title of the dialog shown when fetching add-on data from the store fails
 	_updateFailureMessage = pgettext("addonStore", "Add-on data update failure")
+	_updateFailureMirrorSuggestion = pgettext(
+		"addonStore",
+		# Translators: A suggestion of what to do when fetching add-on data from the store fails and a metadata mirror is being used.
+		# {url} will be replaced with the mirror URL.
+		"Make sure you are connected to the internet, and the Add-on Store mirror URL is valid.\n"
+		"Mirror URL: {url}",
+	)
+	_updateFailureDefaultSuggestion = pgettext(
+		"addonStore",
+		# Translators: Presented when fetching add-on data from the store fails and the default metadata URL is being used.
+		"Unable to establish a connection to the Add-on Store server.",
+	)
 
 	def getLatestCompatibleAddons(
 		self,
@@ -234,15 +247,12 @@ class _DataManager:
 					cachedLanguage=self._lang,
 					nvdaAPIVersion=addonAPIVersion.CURRENT,
 				)
-			elif onDisplayableError is not None:
-				from gui.message import DisplayableError
-
-				displayableError = DisplayableError(
+			else:
+				self._do_displayError(
+					onDisplayableError,
 					# Translators: A message shown when fetching add-on data from the store fails
 					pgettext("addonStore", "Unable to fetch latest add-on data for compatible add-ons."),
-					self._updateFailureMessage,
 				)
-				callLater(delay=0, callable=onDisplayableError.notify, displayableError=displayableError)
 
 		if self._compatibleAddonCache is None:
 			return _createAddonGUICollection()
@@ -273,19 +283,43 @@ class _DataManager:
 					cachedLanguage=self._lang,
 					nvdaAPIVersion=_LATEST_API_VER,
 				)
-			elif onDisplayableError is not None:
-				from gui.message import DisplayableError
-
-				displayableError = DisplayableError(
+			else:
+				self._do_displayError(
+					onDisplayableError,
 					# Translators: A message shown when fetching add-on data from the store fails
 					pgettext("addonStore", "Unable to fetch latest add-on data for incompatible add-ons."),
-					self._updateFailureMessage,
 				)
-				callLater(delay=0, callable=onDisplayableError.notify, displayableError=displayableError)
 
 		if self._latestAddonCache is None:
 			return _createAddonGUICollection()
 		return deepcopy(self._latestAddonCache.cachedAddonData)
+
+	def _do_displayError(
+		self,
+		onDisplayableError: "DisplayableError.OnDisplayableErrorT | None",
+		displayMessage: str,
+		titleMessage: str | None = None,
+	):
+		"""Display a DisplayableMessage if an OnDisplayableError action is given.
+
+		See gui.message.DisplayableError for further information.
+
+		:param onDisplayableError: The displayable error action.
+		:param displayMessage: Body of the displayable error.
+		:param titleMessage: Title of the displayable error. If None, _updateFailureMessage will be used. Defaults to None.
+		"""
+		if onDisplayableError is None:
+			return
+		from gui.message import DisplayableError
+
+		tip = (
+			self._updateFailureMirrorSuggestion.format(url=url)
+			if (url := config.conf["addonStore"]["baseServerURL"])
+			else self._updateFailureDefaultSuggestion
+		)
+		displayMessage = f"{displayMessage}\n{tip}"
+		displayableError = DisplayableError(displayMessage, titleMessage or self._updateFailureMessage)
+		callLater(delay=0, callable=onDisplayableError.notify, displayableError=displayableError)
 
 	def _deleteCacheInstalledAddon(self, addonId: str):
 		addonCachePath = os.path.join(self._installedAddonDataCacheDir, f"{addonId}.json")
@@ -301,7 +335,7 @@ class _DataManager:
 		with open(addonCachePath, "w", encoding="utf-8") as cacheFile:
 			json.dump(addonData.asdict(), cacheFile, ensure_ascii=False)
 
-	def _getCachedInstalledAddonData(self, addonId: str) -> Optional[InstalledAddonStoreModel]:
+	def _getCachedInstalledAddonData(self, addonId: str) -> InstalledAddonStoreModel | None:
 		addonCachePath = os.path.join(self._installedAddonDataCacheDir, f"{addonId}.json")
 		if not os.path.exists(addonCachePath):
 			return None
@@ -315,20 +349,41 @@ class _DataManager:
 			return None
 		return _createInstalledStoreModelFromData(cacheData)
 
-	def _addonsPendingUpdate(self) -> list["_AddonGUIModel"]:
-		addonsPendingUpdate: list["_AddonGUIModel"] = []
-		compatibleAddons = self.getLatestCompatibleAddons()
+	def _addonsPendingUpdate(
+		self,
+		onDisplayableError: "DisplayableError.OnDisplayableErrorT | None" = None,
+	) -> list["_AddonGUIModel"]:
+		updatableAddonStatuses = {AvailableAddonStatus.UPDATE}
+		addonsPendingUpdate: dict[str, _AddonGUIModel] = {}
+		if config.conf["addonStore"]["allowIncompatibleUpdates"]:
+			updatableAddonStatuses.add(AvailableAddonStatus.UPDATE_INCOMPATIBLE)
+			compatibleAddons = self.getLatestAddons(onDisplayableError)
+		else:
+			compatibleAddons = self.getLatestCompatibleAddons(onDisplayableError)
 		for channel in compatibleAddons:
+			# Ensure add-on update channel is within the preferred update channels
 			for addon in compatibleAddons[channel].values():
-				if (
-					getStatus(addon, _StatusFilterKey.UPDATE) == AvailableAddonStatus.UPDATE
-					# Only consider add-ons that have been installed through the Add-on Store
-					and addon._addonHandlerModel._addonStoreData is not None
-				):
-					# Only consider add-on updates for the same channel
-					if addon.channel == addon._addonHandlerModel._addonStoreData.channel:
-						addonsPendingUpdate.append(addon)
-		return addonsPendingUpdate
+				# Ensure add-on is updatable
+				if getStatus(addon, _StatusFilterKey.UPDATE) in updatableAddonStatuses:
+					if (installedStoreData := addon._addonHandlerModel._addonStoreData) is not None:
+						installedChannel = installedStoreData.channel
+					else:
+						installedChannel = Channel.EXTERNAL
+					selectedUpdateChannel = addonDataManager.storeSettings.getAddonSettings(
+						addon.addonId,
+					).updateChannel
+					availableUpdateChannels = selectedUpdateChannel._availableChannelsForAddonWithChannel(
+						installedChannel,
+					)
+					# Ensure add-on channel is valid to update to given update preferences
+					if addon.channel in availableUpdateChannels:
+						if addon.name in addonsPendingUpdate:
+							# See if this version is newer than the currently tracked versions
+							if _canUpdateAddon(addon, addonsPendingUpdate[addon.name]):
+								addonsPendingUpdate[addon.name] = addon
+						else:
+							addonsPendingUpdate[addon.name] = addon
+		return list(addonsPendingUpdate.values())
 
 
 class _InstalledAddonsCache(AutoPropertyObject):

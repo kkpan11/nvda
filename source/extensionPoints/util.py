@@ -1,5 +1,5 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2017-2023 NV Access Limited, Leonard de Ruijter
+# Copyright (C) 2017-2025 NV Access Limited, Leonard de Ruijter
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
@@ -8,31 +8,32 @@ used, however for more advanced requirements these utilities can be used directl
 """
 
 # "annotations" Needed to reference BoundMethodWeakref in one of the init params of itself.
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 import weakref
 import inspect
 from typing import (
-	Callable,
-	Generator,
 	Generic,
-	Optional,
-	OrderedDict,
-	Tuple,
 	TypeVar,
 	Union,
 )
+from collections import OrderedDict
+from collections.abc import Callable, Generator
+
+import NVDAState
+
+from logHandler import log
 
 HandlerT = TypeVar("HandlerT", bound=Callable)
-HandlerKeyT = Union[int, Tuple[int, int]]
+HandlerKeyT = Union[int, tuple[int, int]]  # noqa: UP007
 
 
-class AnnotatableWeakref(weakref.ref, Generic[HandlerT]):
+class AnnotatableWeakref(weakref.ref, Generic[HandlerT]):  # noqa: UP046
 	"""A weakref.ref which allows annotation with custom attributes."""
 
 	handlerKey: int
 
 
-class BoundMethodWeakref(Generic[HandlerT]):
+class BoundMethodWeakref(Generic[HandlerT]):  # noqa: UP046
 	"""Weakly references a bound instance method.
 	Instance methods are bound dynamically each time they are fetched.
 	weakref.ref on a bound instance method doesn't work because
@@ -42,12 +43,12 @@ class BoundMethodWeakref(Generic[HandlerT]):
 	To get the actual method, you call an instance as you would a weakref.ref.
 	"""
 
-	handlerKey: Tuple[int, int]
+	handlerKey: tuple[int, int]
 
 	def __init__(
 		self,
 		target: HandlerT,
-		onDelete: Optional[Callable[[BoundMethodWeakref], None]] = None,
+		onDelete: Callable[[BoundMethodWeakref], None] | None = None,
 	):
 		if onDelete:
 
@@ -61,7 +62,7 @@ class BoundMethodWeakref(Generic[HandlerT]):
 		self.weakInst = weakref.ref(inst, onRefDelete)
 		self.weakFunc = weakref.ref(func, onRefDelete)
 
-	def __call__(self) -> Optional[HandlerT]:
+	def __call__(self) -> HandlerT | None:
 		inst = self.weakInst()
 		if not inst:
 			return
@@ -71,7 +72,7 @@ class BoundMethodWeakref(Generic[HandlerT]):
 		return func.__get__(inst)
 
 
-def _getHandlerKey(handler: HandlerT) -> HandlerKeyT:
+def _getHandlerKey(handler: Callable) -> HandlerKeyT:
 	"""Get a key which identifies a handler function.
 	This is needed because we store weak references, not the actual functions.
 	We store the key on the weak reference.
@@ -83,7 +84,7 @@ def _getHandlerKey(handler: HandlerT) -> HandlerKeyT:
 	return id(handler)
 
 
-class HandlerRegistrar(Generic[HandlerT]):
+class HandlerRegistrar(Generic[HandlerT]):  # noqa: UP046
 	"""Base class to Facilitate registration and unregistration of handler functions.
 	The handlers are stored using weak references and are automatically unregistered
 	if the handler dies.
@@ -96,13 +97,18 @@ class HandlerRegistrar(Generic[HandlerT]):
 	you probably want the L{Action} or L{Filter} subclasses instead.
 	"""
 
-	def __init__(self):
+	def __init__(self, *, _deprecationMessage: str | None = None):
+		"""Initialise the handler registrar.
+
+		:param _deprecationMessage: Optional deprecation message to be logged when :method:`register` is called on the handler.
+		"""
+		self._deprecationMessage = _deprecationMessage
 		#: Registered handler functions.
 		#: This is an OrderedDict where the keys are unique identifiers (as returned by _getHandlerKey)
 		#: and the values are weak references.
 		self._handlers = OrderedDict[
 			HandlerKeyT,
-			Union[BoundMethodWeakref[HandlerT], AnnotatableWeakref[HandlerT]],
+			BoundMethodWeakref[HandlerT] | AnnotatableWeakref[HandlerT],
 		]()
 
 	def register(self, handler: HandlerT):
@@ -113,8 +119,13 @@ class HandlerRegistrar(Generic[HandlerT]):
 		"""
 		if inspect.isfunction(handler):
 			sig = inspect.signature(handler)
-			if sig.parameters and list(sig.parameters)[0] == "self":
+			if sig.parameters and list(sig.parameters)[0] == "self":  # noqa: RUF015
 				raise TypeError("Registering unbound instance methods not supported.")
+		if self._deprecationMessage:
+			if NVDAState._allowDeprecatedAPI():
+				log.warning(self._deprecationMessage, stack_info=True)
+			else:
+				raise RuntimeError(self._deprecationMessage)
 		if inspect.ismethod(handler):
 			weak = BoundMethodWeakref(handler, self.unregister)
 		else:
@@ -143,7 +154,7 @@ class HandlerRegistrar(Generic[HandlerT]):
 
 	def unregister(
 		self,
-		handler: Union[AnnotatableWeakref[HandlerT], BoundMethodWeakref[HandlerT], HandlerT],
+		handler: AnnotatableWeakref[HandlerT] | BoundMethodWeakref[HandlerT] | HandlerT,
 	):
 		if isinstance(handler, (AnnotatableWeakref, BoundMethodWeakref)):
 			key = handler.handlerKey
@@ -156,11 +167,14 @@ class HandlerRegistrar(Generic[HandlerT]):
 		return True
 
 	@property
-	def handlers(self) -> Generator[HandlerT, None, None]:
+	def handlers(self) -> Generator[HandlerT]:
 		"""Generator of registered handler functions.
 		This should be used when you want to call the handlers.
+		A snapshot of the registered handlers is taken before yielding,
+		so that handlers may register or unregister handlers while being called
+		without mutating the collection that is being iterated.
 		"""
-		for weak in self._handlers.values():
+		for weak in list(self._handlers.values()):
 			handler = weak()
 			if not handler:
 				continue  # Died.
@@ -200,7 +214,7 @@ def callWithSupportedKwargs(func, *args, **kwargs):
 	"""
 	sig = inspect.signature(func)
 
-	if inspect.isfunction(func) and sig.parameters and list(sig.parameters)[0] == "self":
+	if inspect.isfunction(func) and sig.parameters and list(sig.parameters)[0] == "self":  # noqa: RUF015
 		raise TypeError("Unbound instance methods are not handled.")
 
 	# Check whether func has a catch-all for kwargs (**kwargs)

@@ -1,18 +1,17 @@
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2015-2018 NV Access Limited, Babbage B.V.
-
+# Copyright (C) 2015-2026 NV Access Limited, Babbage B.V.
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 """Raw input/output for braille displays via HID
 Braille display drivers must be thread-safe to use this, as it utilises a background thread.
 See L{braille.BrailleDisplayDriver.isThreadSafe}.
 """
 
-import ctypes
+import ctypes  # noqa: I001
 from ctypes import byref
 from ctypes.wintypes import USHORT
-from typing import Tuple, Callable, Optional
+from collections.abc import Callable
 from .ioThread import IoThread
 
 from serial.win32 import FILE_FLAG_OVERLAPPED, INVALID_HANDLE_VALUE, CreateFile
@@ -20,9 +19,14 @@ import winKernel
 from logHandler import log
 from .base import IoBase, _isDebug
 import hidpi
+import winBindings.hid
+from utils import _deprecate
+from winBindings import kernel32
 
 
-hidDll = ctypes.windll.hid
+__getattr__ = _deprecate.handleDeprecations(
+	_deprecate.MovedSymbol("hidDll", "winBindings.hid", "dll"),
+)
 
 
 class HidPError(RuntimeError):
@@ -58,11 +62,11 @@ class HidInputReport(HidReport):
 		super().__init__(device)
 
 	def getUsages(self, usagePage, linkCollection=0):
-		maxUsages = hidDll.HidP_MaxUsageListLength(self._reportType, hidpi.USAGE(usagePage), self._dev._pd)
+		maxUsages = winBindings.hid.HidP_MaxUsageListLength(self._reportType, usagePage, self._dev._pd)
 		numUsages = ctypes.c_long(maxUsages)
 		usageList = (hidpi.USAGE * maxUsages)()
 		check_HidP_status(
-			hidDll.HidP_GetUsages,
+			winBindings.hid.HidP_GetUsages,
 			self._reportType,
 			hidpi.USAGE(usagePage),
 			USHORT(linkCollection),
@@ -75,11 +79,11 @@ class HidInputReport(HidReport):
 		return usageList[0 : numUsages.value]
 
 	def getDataItems(self):
-		maxDataLength = hidDll.HidP_MaxDataListLength(self._reportType, self._dev._pd)
+		maxDataLength = winBindings.hid.HidP_MaxDataListLength(self._reportType, self._dev._pd)
 		numDataLength = ctypes.c_ulong(maxDataLength)
 		dataList = (hidpi.HIDP_DATA * maxDataLength)()
 		check_HidP_status(
-			hidDll.HidP_GetData,
+			winBindings.hid.HidP_GetData,
 			self._reportType,
 			dataList,
 			ctypes.byref(numDataLength),
@@ -106,11 +110,11 @@ class HidOutputReport(HidReport):
 	def setUsageValueArray(self, usagePage, linkCollection, usage, data):
 		dataBuf = ctypes.c_buffer(data)
 		check_HidP_status(
-			hidDll.HidP_SetUsageValueArray,
+			winBindings.hid.HidP_SetUsageValueArray,
 			self._reportType,
-			hidpi.USAGE(usagePage),
-			ctypes.c_ushort(linkCollection),
-			hidpi.USAGE(usage),
+			usagePage,
+			linkCollection,
+			usage,
 			dataBuf,
 			len(dataBuf),
 			self._dev._pd,
@@ -129,8 +133,8 @@ class Hid(IoBase):
 		path: str,
 		onReceive: Callable[[bytes], None],
 		exclusive: bool = True,
-		onReadError: Optional[Callable[[int], bool]] = None,
-		ioThread: Optional[IoThread] = None,
+		onReadError: Callable[[int], bool] | None = None,
+		ioThread: IoThread | None = None,
 	):
 		"""Constructor.
 		@param path: The device path.
@@ -144,10 +148,10 @@ class Hid(IoBase):
 			if C{None}, defaults to L{hwIo.bgThread}
 		"""
 		if _isDebug():
-			log.debug("Opening device %s" % path)
+			log.debug("Opening device %s" % path)  # noqa: UP031
 		handle = CreateFile(
 			path,
-			winKernel.GENERIC_READ | winKernel.GENERIC_WRITE,
+			kernel32.GENERIC.READ | kernel32.GENERIC.WRITE,
 			0 if exclusive else winKernel.FILE_SHARE_READ | winKernel.FILE_SHARE_WRITE,
 			None,
 			winKernel.OPEN_EXISTING,
@@ -156,19 +160,19 @@ class Hid(IoBase):
 		)
 		if handle == INVALID_HANDLE_VALUE:
 			if _isDebug():
-				log.debug("Open failed: %s" % ctypes.WinError())
+				log.debug("Open failed: %s" % ctypes.WinError())  # noqa: UP031
 			raise ctypes.WinError()
 		pd = ctypes.c_void_p()
-		if not hidDll.HidD_GetPreparsedData(handle, byref(pd)):
+		if not winBindings.hid.HidD_GetPreparsedData(handle, byref(pd)):
 			raise ctypes.WinError()
 		self._pd = pd
 		caps = self.caps
 		self.usagePage = caps.UsagePage
 		if _isDebug():
-			log.debug("usage ID: 0X%X" % caps.Usage)
-			log.debug("usage page: 0X%X" % caps.UsagePage)
+			log.debug("usage ID: 0X%X" % caps.Usage)  # noqa: UP031
+			log.debug("usage page: 0X%X" % caps.UsagePage)  # noqa: UP031
 			log.debug(
-				"Report byte lengths: input %d, output %d, feature %d"
+				"Report byte lengths: input %d, output %d, feature %d"  # noqa: UP031
 				% (
 					caps.InputReportByteLength,
 					caps.OutputReportByteLength,
@@ -193,26 +197,26 @@ class Hid(IoBase):
 		if hasattr(self, "_caps"):
 			return self._caps
 		caps = hidpi.HIDP_CAPS()
-		check_HidP_status(hidDll.HidP_GetCaps, self._pd, byref(caps))
+		check_HidP_status(winBindings.hid.HidP_GetCaps, self._pd, byref(caps))
 		self._caps = caps
 		return self._caps
 
 	@property
-	def inputButtonCaps(self) -> ctypes.Array[hidpi.HIDP_VALUE_CAPS]:
+	def inputButtonCaps(self) -> ctypes.Array[hidpi.HIDP_BUTTON_CAPS]:
 		if hasattr(self, "_inputButtonCaps"):
 			return self._inputButtonCaps
-		valueCapsList = (hidpi.HIDP_VALUE_CAPS * self.caps.NumberInputButtonCaps)()
-		numValueCaps = ctypes.c_long(self.caps.NumberInputButtonCaps)
-		if numValueCaps.value == 0:
-			return valueCapsList
+		buttonCapsList = (hidpi.HIDP_BUTTON_CAPS * self.caps.NumberInputButtonCaps)()
+		numButtonCaps = ctypes.c_ushort(self.caps.NumberInputButtonCaps)
+		if numButtonCaps.value == 0:
+			return buttonCapsList
 		check_HidP_status(
-			hidDll.HidP_GetButtonCaps,
+			winBindings.hid.HidP_GetButtonCaps,
 			hidpi.HIDP_REPORT_TYPE.INPUT,
-			ctypes.byref(valueCapsList),
-			ctypes.byref(numValueCaps),
+			buttonCapsList,
+			ctypes.byref(numButtonCaps),
 			self._pd,
 		)
-		self._inputButtonCaps = valueCapsList
+		self._inputButtonCaps = buttonCapsList
 		return self._inputButtonCaps
 
 	@property
@@ -220,13 +224,13 @@ class Hid(IoBase):
 		if hasattr(self, "_inputValueCaps"):
 			return self._inputValueCaps
 		valueCapsList = (hidpi.HIDP_VALUE_CAPS * self.caps.NumberInputValueCaps)()
-		numValueCaps = ctypes.c_long(self.caps.NumberInputValueCaps)
+		numValueCaps = ctypes.c_ushort(self.caps.NumberInputValueCaps)
 		if numValueCaps.value == 0:
 			return valueCapsList
 		check_HidP_status(
-			hidDll.HidP_GetValueCaps,
+			winBindings.hid.HidP_GetValueCaps,
 			hidpi.HIDP_REPORT_TYPE.INPUT,
-			ctypes.byref(valueCapsList),
+			valueCapsList,
 			ctypes.byref(numValueCaps),
 			self._pd,
 		)
@@ -238,20 +242,20 @@ class Hid(IoBase):
 		if hasattr(self, "_outputValueCaps"):
 			return self._outputValueCaps
 		valueCapsList = (hidpi.HIDP_VALUE_CAPS * self.caps.NumberOutputValueCaps)()
-		numValueCaps = ctypes.c_long(self.caps.NumberOutputValueCaps)
+		numValueCaps = ctypes.c_ushort(self.caps.NumberOutputValueCaps)
 		if numValueCaps.value == 0:
 			return valueCapsList
 		check_HidP_status(
-			hidDll.HidP_GetValueCaps,
+			winBindings.hid.HidP_GetValueCaps,
 			hidpi.HIDP_REPORT_TYPE.OUTPUT,
-			ctypes.byref(valueCapsList),
+			valueCapsList,
 			ctypes.byref(numValueCaps),
 			self._pd,
 		)
 		self._outputValueCaps = valueCapsList
 		return self._outputValueCaps
 
-	def _prepareWriteBuffer(self, data: bytes) -> Tuple[int, ctypes.c_char_p]:
+	def _prepareWriteBuffer(self, data: bytes) -> tuple[int, ctypes.c_char_p]:
 		"""For HID devices, the buffer to be written must match the
 		OutputReportByteLength fetched from HIDP_CAPS, to ensure this is the case
 		we create a buffer of that size. We also check that data is not bigger than
@@ -274,14 +278,14 @@ class Hid(IoBase):
 		@return: The report, including the report id.
 		"""
 		buf = ctypes.create_string_buffer(reportId, size=self._featureSize)
-		if not hidDll.HidD_GetFeature(self._file, buf, self._featureSize):
+		if not winBindings.hid.HidD_GetFeature(self._file, buf, self._featureSize):
 			if _isDebug():
 				log.debug(
-					"Get feature %r failed: %s" % (reportId, ctypes.WinError()),
+					"Get feature %r failed: %s" % (reportId, ctypes.WinError()),  # noqa: UP031
 				)
 			raise ctypes.WinError()
 		if _isDebug():
-			log.debug("Get feature: %r" % buf.raw)
+			log.debug("Get feature: %r" % buf.raw)  # noqa: UP031
 		return buf.raw
 
 	def setFeature(self, report: bytes) -> None:
@@ -291,15 +295,15 @@ class Hid(IoBase):
 		buf = ctypes.create_string_buffer(report, size=len(report))
 		bufSize = ctypes.sizeof(buf)
 		if _isDebug():
-			log.debug("Set feature: %r" % report)
-		result = hidDll.HidD_SetFeature(
+			log.debug("Set feature: %r" % report)  # noqa: UP031
+		result = winBindings.hid.HidD_SetFeature(
 			self._file,
 			buf,
 			bufSize,
 		)
 		if not result:
 			if _isDebug():
-				log.debug("Set feature failed: %s" % ctypes.WinError())
+				log.debug("Set feature failed: %s" % ctypes.WinError())  # noqa: UP031
 			raise ctypes.WinError()
 
 	def setOutputReport(self, report: bytes) -> None:
@@ -311,23 +315,23 @@ class Hid(IoBase):
 		buf = ctypes.create_string_buffer(report, size=len(report))
 		bufSize = ctypes.sizeof(buf)
 		if _isDebug():
-			log.debug("Set output report: %r" % report)
-		result = hidDll.HidD_SetOutputReport(
+			log.debug("Set output report: %r" % report)  # noqa: UP031
+		result = winBindings.hid.HidD_SetOutputReport(
 			self._writeFile,
 			buf,
 			bufSize,
 		)
 		if not result:
 			if _isDebug():
-				log.debug("Set output report failed: %s" % ctypes.WinError())
+				log.debug("Set output report failed: %s" % ctypes.WinError())  # noqa: UP031
 			raise ctypes.WinError()
 
 	def close(self):
 		if self._isClosed:
 			log.debug("Attempted to close an already closed device.")
 			return
-		super(Hid, self).close()
+		super().close()
 		winKernel.closeHandle(self._file)
 		self._file = None
-		hidDll.HidD_FreePreparsedData(self._pd)
+		winBindings.hid.HidD_FreePreparsedData(self._pd)
 		self._isClosed = True

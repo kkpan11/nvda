@@ -4,15 +4,13 @@
 # Copyright (C) 2023-2024 NV Access Limited
 
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: I001
 from typing import (
-	Type,
 	Any,
-	Callable,
-	Generator,
 	TypeVar,
 	cast,
 )
+from collections.abc import Callable, Generator
 import contextlib
 from comtypes import (
 	GUID,
@@ -38,6 +36,7 @@ from .remoteTypes import (
 	RemoteArray,
 	RemoteElement,
 	RemoteTextRange,
+	RemoteCacheRequest,
 )
 
 
@@ -51,7 +50,7 @@ class RemoteAPI(builder._RemoteBase):
 		self._op = op
 		self._logObj = self.newString() if enableRemoteLogging else None
 
-	def Return(self, *values: RemoteBaseObject | int | float | str | bool | None):
+	def Return(self, *values: RemoteBaseObject | float | str | bool | None):
 		remoteValues = [RemoteBaseObject.ensureRemote(self.rob, value) for value in values]
 		if len(remoteValues) == 1:
 			remoteValue = remoteValues[0]
@@ -71,7 +70,7 @@ class RemoteAPI(builder._RemoteBase):
 		self._op._returnIdOperand.set(remoteValue.operandId.value)
 		self.halt()
 
-	def Yield(self, *values: RemoteBaseObject | int | float | str | bool | None):
+	def Yield(self, *values: RemoteBaseObject | float | str | bool | None):
 		self.addCompiletimeComment(f"Begin yield {values}")
 		remoteValues = [RemoteBaseObject.ensureRemote(self.rob, value) for value in values]
 		if len(remoteValues) == 1:
@@ -93,7 +92,7 @@ class RemoteAPI(builder._RemoteBase):
 
 	def _newObject(
 		self,
-		RemoteType: Type[_newObject_RemoteType],
+		RemoteType: type[_newObject_RemoteType],
 		value: Any,
 		static: bool = False,
 	) -> _newObject_RemoteType:
@@ -130,6 +129,9 @@ class RemoteAPI(builder._RemoteBase):
 
 	def newVariant(self) -> RemoteVariant:
 		return RemoteVariant.createNew(self.rob)
+
+	def newCacheRequest(self) -> RemoteCacheRequest:
+		return RemoteCacheRequest.createNew(self.rob)
 
 	def newArray(self) -> RemoteArray:
 		return RemoteArray.createNew(self.rob)
@@ -206,9 +208,9 @@ class RemoteAPI(builder._RemoteBase):
 	def elseBlock(self, silent: bool = False):
 		scopeInstructionJustExited = self._scopeInstructionJustExited
 		if not isinstance(scopeInstructionJustExited, instructions.ForkIfFalse):
-			raise RuntimeError("Else block not directly preceded by If block")
+			raise RuntimeError("Else block not directly preceded by If block")  # noqa: TRY004
 		instructionList = self.rob.getDefaultInstructionList()
-		ifConditionInstruction = cast(instructions.ForkIfFalse, scopeInstructionJustExited)
+		ifConditionInstruction = scopeInstructionJustExited
 		# add a final jump instruction to the previous if block to skip over the else block.
 		if not silent:
 			instructionList.addComment("Jump over else block")
@@ -271,8 +273,8 @@ class RemoteAPI(builder._RemoteBase):
 		start: _range_intTypeVar | int,
 		stop: _range_intTypeVar | int,
 		step: _range_intTypeVar | int = 1,
-	) -> Generator[RemoteIntBase, None, None]:
-		RemoteType: Type[RemoteIntBase] = RemoteInt
+	) -> Generator[RemoteIntBase]:
+		RemoteType: type[RemoteIntBase] = RemoteInt
 		for arg in (start, stop, step):
 			if isinstance(arg, RemoteUint):
 				RemoteType = RemoteUint
@@ -282,14 +284,14 @@ class RemoteAPI(builder._RemoteBase):
 		remoteStep = cast(RemoteIntBase, RemoteType).ensureRemote(self.rob, cast(RemoteIntBase, step))
 		counter = remoteStart.copy()
 		with self.whileBlock(lambda: counter < remoteStop):
-			yield cast(RemoteIntBase, counter)
+			yield counter
 			counter += remoteStep
 
 	@remoteContextManager
 	def forEachItemInArray(
 		self,
 		array: RemoteArray,
-	) -> Generator[RemoteVariant, None, None]:
+	) -> Generator[RemoteVariant]:
 		with self.forEachNumInRange(0, array.size()) as index:
 			yield array[index]
 
@@ -317,9 +319,9 @@ class RemoteAPI(builder._RemoteBase):
 	def catchBlock(self, silent: bool = False):
 		scopeInstructionJustExited = self._scopeInstructionJustExited
 		if not isinstance(scopeInstructionJustExited, instructions.NewTryBlock):
-			raise RuntimeError("Catch block not directly preceded by Try block")
+			raise RuntimeError("Catch block not directly preceded by Try block")  # noqa: TRY004
 		instructionList = self.rob.getDefaultInstructionList()
-		tryBlockInstruction = cast(instructions.NewTryBlock, scopeInstructionJustExited)
+		tryBlockInstruction = scopeInstructionJustExited
 		# add a final jump instruction to the previous try block to skip over the catch block.
 		if not silent:
 			instructionList.addComment("Jump over catch block")

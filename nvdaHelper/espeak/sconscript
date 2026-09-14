@@ -1,5 +1,11 @@
+#!/usr/bin/env python3
+# A part of NonVisual Desktop Access (NVDA)
+# This file is covered by the GNU General Public License.
+# See the file COPYING for more details.
+# Copyright (C) 2011-2026 NV Access Limited
+
+import ctypes.wintypes  # noqa: I001
 import enum
-import typing
 import os
 import ctypes
 import SCons.Node
@@ -14,13 +20,26 @@ Import(
 	[
 		"thirdPartyEnv",
 		"sourceDir",
-	]
+		"sonicLib",
+	],
 )
+
+freeLibrary = ctypes.windll.kernel32.FreeLibrary
+freeLibrary.argtypes = (ctypes.wintypes.HANDLE,)
+DLL_DIRECTORY_COOKIE = ctypes.c_void_p
+AddDllDirectory = ctypes.windll.kernel32.AddDllDirectory
+AddDllDirectory.argtypes = (ctypes.wintypes.LPCWSTR,)
+AddDllDirectory.restype = DLL_DIRECTORY_COOKIE
+
+# Add the directory of the sonic dll to our DLL search path
+# So that eSpeak.dll cna find it when being loaded to compile dictionaries etc.
+sonicDllDir = sonicLib[0].get_dir().abspath
+AddDllDirectory(sonicDllDir)
 
 
 class AutoFreeCDLL(ctypes.CDLL):
 	def __del__(self):
-		ctypes.windll.kernel32.FreeLibrary(self._handle)
+		freeLibrary(self._handle)
 
 
 synthDriversDir = sourceDir.Dir("synthDrivers")
@@ -94,15 +113,12 @@ class espeak_AUDIO_OUTPUT(enum.IntEnum):
 env: SCons.Environment.Environment = thirdPartyEnv.Clone()
 env.Append(
 	CCFLAGS=[
-		# Whole-program optimization causes eSpeak to distort and warble with its Klatt4 voice
-		# Therefore specifically force it off
-		"/GL-",
 		# Ignore all warnings as the code is not ours.
 		"/W0",
 		# Preprocessor definitions. Migrated from 'nvdaHelper/espeak/config.h'
-		'/DPACKAGE_VERSION=\\"1.52-dev 961454ff\\"',  # See 'include/espeak/src/windows/config.h'
+		'/DPACKAGE_VERSION=\\"1.52.0\\"',  # See 'include/espeak/src/windows/config.h'
 		"/DHAVE_STDINT_H=1",
-		"/D__WIN32__#1",
+		"/D__WIN32__=1",
 		"/DLIBESPEAK_NG_EXPORT",
 		# Define WIN32_LEAN_AND_MEAN for preprocessor to prevent windows.h including winsock causing redefinition
 		# errors when winsock2 is included by espeak\src\include\compat\endian.h
@@ -111,7 +127,7 @@ env.Append(
 		"/DUSE_SPEECHPLAYER=1",
 		"/DUSE_KLATT=1",
 		"/DUSE_LIBSONIC=1",
-	]
+	],
 )
 
 env.Append(
@@ -122,7 +138,7 @@ env.Append(
 		espeakSrcDir.Dir("speechPlayer/include"),
 		sonicSrcDir,
 		espeakSrcDir.Dir("ucd-tools/src/include"),
-	]
+	],
 )
 
 
@@ -132,7 +148,7 @@ def espeak_compilePhonemeData_buildEmitter(target, source, env):
 		[
 			[Dir(topDir).File(f) for f in files if f not in phSourceIgnores]
 			for topDir, subdirs, files in os.walk(source[0].abspath)
-		]
+		],
 	)
 	sources = env.Flatten([phSources])
 	targets = [
@@ -191,11 +207,18 @@ env["BUILDERS"]["espeak_compilePhonemeData"] = Builder(
 	emitter=espeak_compilePhonemeData_buildEmitter,
 )
 
-#: See dictionaries section of /include/espeak/Makefile.am
-espeakDictionaryCompileList: typing.Dict[
+#: See upstream eSpeak NG build configuration and dictionary sources under /include/espeak (CMake config + dictsource).
+espeakDictionaryCompileList: dict[
 	str,  # expected dict file name EG 'es_dict'
-	typing.Tuple[str, typing.List[str]],  # language code, list of input files
+	tuple[str, list[str]],  # language code, list of input files
 ] = {
+	"ab_dict": (
+		"ab",
+		[
+			"ab_list",
+			"ab_rules",
+		],
+	),
 	"af_dict": (
 		"af",
 		[
@@ -282,6 +305,7 @@ espeakDictionaryCompileList: typing.Dict[
 			"chr_rules",
 		],
 	),
+	"crh_dict": ("crh", ["crh_list", "crh_rules"]),
 	"cmn_dict": ("cmn", ["cmn_listx", "cmn_list", "cmn_rules"]),
 	"cs_dict": (
 		"cs",
@@ -594,6 +618,13 @@ espeakDictionaryCompileList: typing.Dict[
 			"lfn_rules",
 		],
 	),
+	"lij_dict": (
+		"lij",
+		[
+			"lij_list",
+			"lij_rules",
+		],
+	),
 	"lt_dict": (
 		"lt",
 		[
@@ -629,6 +660,7 @@ espeakDictionaryCompileList: typing.Dict[
 			"ml_rules",
 		],
 	),
+	"mn_dict": ("mn", ["mn_list", "mn_rules"]),
 	"mr_dict": (
 		"mr",
 		[
@@ -741,6 +773,7 @@ espeakDictionaryCompileList: typing.Dict[
 			"pl_rules",
 		],
 	),
+	"ps_dict": ("ps", ["ps_list", "ps_rules"]),
 	"pt_dict": (
 		"pt",
 		[
@@ -791,6 +824,7 @@ espeakDictionaryCompileList: typing.Dict[
 		],
 	),
 	"ru_dict": ("ru", ["ru_listx", "ru_list", "ru_rules"]),
+	"rup_dict": ("rup", ["rup_list", "rup_rules"]),
 	"sd_dict": (
 		"sd",
 		[
@@ -959,8 +993,8 @@ espeakDictionaryCompileList: typing.Dict[
 
 
 def espeak_compileDict_buildAction(
-	target: typing.List[SCons.Node.FS.File],
-	source: typing.List[SCons.Node.FS.File],
+	target: list[SCons.Node.FS.File],
+	source: list[SCons.Node.FS.File],
 	env: SCons.Environment.Environment,
 ) -> int:
 	"""
@@ -972,7 +1006,7 @@ def espeak_compileDict_buildAction(
 		exit status to indicate an unsuccessful build."
 	"""
 	if len(target) != 1:
-		targetStrings = list((str(t) for t in target))
+		targetStrings = list(str(t) for t in target)  # noqa: C400
 		raise ValueError(f"Unexpected number of targets: {targetStrings}")
 	target = target[0]
 
@@ -1008,7 +1042,7 @@ def espeak_compileDict_buildAction(
 		# returns: espeak_ERROR
 		setVoiceResult = espeak.espeak_SetVoiceByProperties(ctypes.byref(voice))
 		if espeak_ERROR.EE_OK.value != setVoiceResult:
-			print(f"Failed to switch to language: '{lang}'" f"\n result: {espeak_ERROR(setVoiceResult)!s}")
+			print(f"Failed to switch to language: '{lang}'\n result: {espeak_ERROR(setVoiceResult)!s}")
 			return ACTION_FAILURE
 
 		rulesPathEncoded = os.fsencode(dirForRules.abspath + "/")
@@ -1026,19 +1060,13 @@ def espeak_compileDict_buildAction(
 				f"Failed to compile dictionary: '{target}'"
 				f"\n rulesPath: {rulesPathEncoded}"
 				f"\n language: '{lang}'"
-				f"\n result: {espeak_ng_STATUS(compileDictResult)!s}"
+				f"\n result: {espeak_ng_STATUS(compileDictResult)!s}",
 			)
 			return ACTION_FAILURE
 	finally:
 		espeak.espeak_Terminate()
 	return ACTION_SUCCESS
 
-
-sonicLib = env.StaticLibrary(
-	target="sonic",
-	srcdir=sonicSrcDir.abspath,
-	source="sonic.c",
-)
 
 espeakLib = env.SharedLibrary(
 	target="espeak",
@@ -1082,7 +1110,6 @@ espeakLib = env.SharedLibrary(
 		"tr_languages.c",
 		"voices.c",
 		"wavegen.c",
-		sonicLib,
 		# espeak OPT_SPEECHPLAYER block
 		"sPlayer.c",
 		"../speechPlayer/src/frame.cpp",
@@ -1100,7 +1127,8 @@ espeakLib = env.SharedLibrary(
 		# com\ttsengine.cpp
 		# We do not use the ASYNC compile option in espeak.
 	],
-	LIBS=["advapi32"],
+	LIBS=["advapi32", sonicLib[2]],
+	LIBPATH=".",
 )
 
 
@@ -1108,7 +1136,7 @@ phonemeData = env.espeak_compilePhonemeData(espeakRepo.Dir("espeak-ng-data"), es
 env.Depends(phonemeData, espeakLib)
 for i in phonemeData:
 	iDir = espeakRepo.Dir("espeak-ng-data").abspath
-	l = len(iDir) + 1  # noqa: E741
+	l = len(iDir) + 1
 	fileName = i.abspath[l:]
 	env.InstallAs(os.path.join(synthDriversDir.Dir("espeak-ng-data").abspath, fileName), i)
 
@@ -1118,10 +1146,11 @@ for i in phonemeData:
 env.AddPreAction(espeakLib, env.Action(cleanFiles_preBuildAction))
 # Move any extra dictionaries into dictsource for compilation
 env.Install(
-	espeakRepo.Dir("dictsource"), env.Glob(os.path.join(espeakRepo.abspath, "dictsource", "extra", "*_*"))
+	espeakRepo.Dir("dictsource"),
+	env.Glob(os.path.join(espeakRepo.abspath, "dictsource", "extra", "*_*")),
 )
 
-excludeLangs: typing.List[str] = []
+excludeLangs: list[str] = []
 """Used to exclude languages which don't compile.
 """
 
@@ -1138,7 +1167,7 @@ for dictFileName, (langCode, inputFiles) in espeakDictionaryCompileList.items():
 
 	dictFile = env.Command(
 		target=dictFilePath,
-		source=list((dictSourcePath.File(f) for f in inputFiles)),
+		source=list(dictSourcePath.File(f) for f in inputFiles),  # noqa: C400
 		action=espeak_compileDict_buildAction,
 	)
 
@@ -1147,7 +1176,8 @@ for dictFileName, (langCode, inputFiles) in espeakDictionaryCompileList.items():
 	# Dictionaries can not be compiled in parallel, force SCons not to do this
 	env.SideEffect("_espeak_compileDict", dictFile)
 	env.InstallAs(  # Install files to the "synthDrivers/espeak-ng-data/" dir.
-		os.path.join(synthDriversDir.Dir("espeak-ng-data").abspath, dictFileName), dictFile
+		os.path.join(synthDriversDir.Dir("espeak-ng-data").abspath, dictFileName),
+		dictFile,
 	)
 
 env.Install(synthDriversDir, espeakLib)
@@ -1159,5 +1189,6 @@ espeakDataSource = espeakRepo.Dir("espeak-ng-data")
 # also install the lang and voices/!v directories. Exclude the voices/mb directory since we are not using mbrola.
 env.RecursiveInstall(targetEspeakDataDir.Dir("lang"), espeakDataSource.Dir("lang").abspath)
 env.RecursiveInstall(
-	targetEspeakDataDir.Dir("voices").Dir("!v"), espeakDataSource.Dir("voices").Dir("!v").abspath
+	targetEspeakDataDir.Dir("voices").Dir("!v"),
+	espeakDataSource.Dir("voices").Dir("!v").abspath,
 )

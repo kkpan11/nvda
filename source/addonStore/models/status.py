@@ -1,19 +1,16 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2022-2023 NV Access Limited, Cyrille Bougot
+# Copyright (C) 2022-2025 NV Access Limited, Cyrille Bougot
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-import enum
+import enum  # noqa: I001
 import os
 from pathlib import Path
 from typing import (
-	Dict,
-	Optional,
-	OrderedDict,
 	Protocol,
-	Set,
 	TYPE_CHECKING,
 )
+from collections import OrderedDict
 
 import globalVars
 from logHandler import log
@@ -23,8 +20,8 @@ from utils.displayString import DisplayStringEnum
 from .version import MajorMinorPatch, SupportsVersionCheck
 
 if TYPE_CHECKING:
-	from .addon import _AddonGUIModel  # noqa: F401
-	from addonHandler import AddonsState  # noqa: F401
+	from .addon import _AddonGUIModel, AddonHandlerModel, _AddonStoreModel  # noqa: I001
+	from addonHandler import AddonsState
 
 
 class EnabledStatus(DisplayStringEnum):
@@ -33,7 +30,7 @@ class EnabledStatus(DisplayStringEnum):
 	DISABLED = enum.auto()
 
 	@property
-	def _displayStringLabels(self) -> Dict["EnabledStatus", str]:
+	def _displayStringLabels(self) -> dict["EnabledStatus", str]:
 		return {
 			# Translators: The label of an option to filter the list of add-ons in the add-on store dialog.
 			self.ALL: pgettext("addonStore", "All"),
@@ -80,7 +77,7 @@ class AvailableAddonStatus(DisplayStringEnum):
 	RUNNING = enum.auto()  # enabled and active.
 
 	@property
-	def _displayStringLabels(self) -> Dict["AvailableAddonStatus", str]:
+	def _displayStringLabels(self) -> dict["AvailableAddonStatus", str]:
 		return {
 			# Translators: Status for addons shown in the add-on store dialog
 			self.PENDING_REMOVE: pgettext("addonStore", "Pending removal"),
@@ -168,7 +165,7 @@ class _StatusFilterKey(DisplayStringEnum):
 	INCOMPATIBLE = enum.auto()
 
 	@property
-	def _displayStringLabels(self) -> Dict["_StatusFilterKey", str]:
+	def _displayStringLabels(self) -> dict["_StatusFilterKey", str]:
 		return {
 			# Translators: The label of a tab to display installed add-ons in the add-on store.
 			# Ensure the translation matches the label for the add-on list which includes an accelerator key.
@@ -185,7 +182,7 @@ class _StatusFilterKey(DisplayStringEnum):
 		}
 
 	@property
-	def _displayStringLabelsWithAccelerators(self) -> Dict["_StatusFilterKey", str]:
+	def _displayStringLabelsWithAccelerators(self) -> dict["_StatusFilterKey", str]:
 		return {
 			# Translators: The label of the add-ons list in the corresponding panel.
 			# Preferably use the same accelerator key for the four labels.
@@ -214,10 +211,10 @@ class _StatusFilterKey(DisplayStringEnum):
 			return self._displayStringLabelsWithAccelerators[self]
 		except KeyError as e:
 			log.error(f"No translation mapping for: {self}")
-			raise e
+			raise e  # noqa: TRY201
 
 
-def _getDownloadableStatus(model: "_AddonGUIModel") -> Optional[AvailableAddonStatus]:
+def _getDownloadableStatus(model: "_AddonGUIModel") -> AvailableAddonStatus | None:
 	from ..dataManager import addonDataManager
 
 	assert addonDataManager is not None
@@ -243,32 +240,29 @@ def _getDownloadableStatus(model: "_AddonGUIModel") -> Optional[AvailableAddonSt
 	return None
 
 
-def _getUpdateStatus(model: "_AddonGUIModel") -> Optional[AvailableAddonStatus]:
-	from .addon import AddonStoreModel
+def _canUpdateAddon(
+	availableAddon: "_AddonStoreModel",
+	baseAddon: "_AddonStoreModel | AddonHandlerModel",
+) -> bool | None:
+	"""Check if an add-on can be updated.
+
+	:param model: Add-on to check if it can be updated.
+	:return: True if the add-on can be updated, False if it cannot,
+	None if it is unknown (e.g. cannot parse current version string).
+	"""
+	from .addon import _AddonStoreModel  # noqa: I001
+	from addonHandler import Addon as AddonHandlerModel
 	from ..dataManager import addonDataManager
 
 	assert addonDataManager is not None
 
-	if not isinstance(model, AddonStoreModel):
-		# If the listed add-on is installed from a side-load
-		# and not available on the add-on store
-		# the type will not be AddonStoreModel
-		return None
-
-	if model._anyPendingInstallForId:
-		return None
-
-	addonStoreInstalledData = addonDataManager._getCachedInstalledAddonData(model.addonId)
-	if addonStoreInstalledData is not None:
-		if model.addonVersionNumber > addonStoreInstalledData.addonVersionNumber:
-			if not model.isCompatible:
-				return AvailableAddonStatus.UPDATE_INCOMPATIBLE
-			return AvailableAddonStatus.UPDATE
-	else:
+	if isinstance(baseAddon, _AddonStoreModel):
+		return availableAddon.addonVersionNumber > baseAddon.addonVersionNumber
+	elif isinstance(baseAddon, AddonHandlerModel):
 		# Parsing from a side-loaded add-on
 		try:
 			manifestAddonVersion = MajorMinorPatch._parseVersionFromVersionStr(
-				model._addonHandlerModel.version,
+				baseAddon.version,
 			)
 		except ValueError:
 			# Parsing failed to get a numeric version.
@@ -276,18 +270,67 @@ def _getUpdateStatus(model: "_AddonGUIModel") -> Optional[AvailableAddonStatus]:
 			# however the manifest only has a version string.
 			# Ensure the user is aware that it may be a downgrade or reinstall.
 			# Encourage users to re-install or upgrade the add-on from the add-on store.
+			return None
+		else:
+			return availableAddon.addonVersionNumber > manifestAddonVersion
+	else:
+		raise TypeError(f"Unexpected type: {type(baseAddon)}")
+
+
+def _getUpdateStatus(model: "_AddonGUIModel") -> AvailableAddonStatus | None:
+	"""Get the update status for an add-on.
+
+	:param model: Add-on to check if it can be updated.
+	:return: Update status of add-on for the context of the current tab.
+	None if the add-on is not installed or cannot be updated.
+	"""
+	from ..dataManager import addonDataManager
+	from ..models.addon import AddonStoreModel
+
+	if model.isPendingRemove:
+		return None
+	if not isinstance(model, AddonStoreModel):
+		# If the listed add-on is installed from a side-load
+		# and not available on the add-on store
+		# the type will not be AddonStoreModel
+		return None
+
+	if model._anyPendingInstallForId:
+		# Update/install already pending
+		return None
+
+	installedAddonData: _AddonStoreModel | AddonHandlerModel | None = (
+		addonDataManager._getCachedInstalledAddonData(model.addonId)
+	)
+	if installedAddonData is None:
+		# Use manifest if add-on store data is not available
+		installedAddonData = model._addonHandlerModel
+	if installedAddonData is None:
+		# Add-on is not installed.
+		# No update status.
+		return None
+
+	canUpdateAddon = _canUpdateAddon(model, installedAddonData)
+	match canUpdateAddon:
+		case None:
+			# Cannot determine if add-on can be updated,
+			# e.g. version string cannot be parsed.
 			return AvailableAddonStatus.REPLACE_SIDE_LOAD
+		case True:
+			# Add-on is installed and can be updated.
+			if model.isCompatible:
+				return AvailableAddonStatus.UPDATE
+			return AvailableAddonStatus.UPDATE_INCOMPATIBLE
+		case False:
+			# Add-on is not installed or cannot be updated.
+			# No update status.
+			return None
+		case _:
+			raise ValueError(f"Unexpected value: {canUpdateAddon}")
 
-		if model.addonVersionNumber > manifestAddonVersion:
-			if not model.isCompatible:
-				return AvailableAddonStatus.UPDATE_INCOMPATIBLE
-			return AvailableAddonStatus.UPDATE
 
-	return None
-
-
-def _getInstalledStatus(model: "_AddonGUIModel") -> Optional[AvailableAddonStatus]:
-	from addonHandler import state as addonHandlerState
+def _getInstalledStatus(model: "_AddonGUIModel") -> AvailableAddonStatus | None:
+	from addonHandler import state as addonHandlerState  # noqa: I001
 	from ..dataManager import addonDataManager
 
 	assert addonDataManager is not None
@@ -346,7 +389,7 @@ def getStatus(model: "_AddonGUIModel", context: _StatusFilterKey) -> AvailableAd
 
 _addonStoreStateToAddonHandlerState: OrderedDict[
 	AvailableAddonStatus,
-	Set[AddonStateCategory],
+	set[AddonStateCategory],
 ] = OrderedDict(
 	{
 		# Pending states must be first as the pending state may be altering another state.
@@ -413,7 +456,7 @@ _updatableStatuses: set[AvailableAddonStatus] = {
 	AvailableAddonStatus.REPLACE_SIDE_LOAD,
 }
 
-_statusFilters: OrderedDict[_StatusFilterKey, Set[AvailableAddonStatus]] = OrderedDict(
+_statusFilters: OrderedDict[_StatusFilterKey, set[AvailableAddonStatus]] = OrderedDict(
 	{
 		_StatusFilterKey.INSTALLED: _installedAddonStatuses,
 		_StatusFilterKey.UPDATE: _updatableStatuses.union(_installingStatuses),

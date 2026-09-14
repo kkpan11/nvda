@@ -1,17 +1,11 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2007-2023 NV Access Limited, Babbage B.V., James Teh, Leonard de Ruijter,
-# Thomas Stivers, Accessolutions, Julien Cochuyt, Cyrille Bougot
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
+# Copyright (C) 2007-2026 NV Access Limited, Babbage B.V., James Teh, Leonard de Ruijter,
+# Thomas Stivers, Accessolutions, Julien Cochuyt, Cyrille Bougot, Kefas Lungu
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-from typing import (
-	Any,
-	Callable,
-	Generator,
-	Union,
-	cast,
-)
-from collections.abc import Generator  # noqa: F811
+from typing import Any  # noqa: I001
+from collections.abc import Callable, Generator
 import os
 import itertools
 import collections
@@ -19,6 +13,7 @@ import winsound
 import time
 import weakref
 import re
+from comtypes import COMError
 
 import wx
 import core
@@ -54,7 +49,8 @@ from NVDAObjects import NVDAObject
 import gui.contextHelp
 from abc import ABCMeta, abstractmethod
 import globalVars
-from typing import Optional
+from utils.debounce import debounceLimiter
+from utils import urlUtils
 
 
 def reportPassThrough(treeInterceptor, onlyIfChanged=True):
@@ -115,7 +111,7 @@ def mergeQuickNavItemIterators(iterators, direction="next"):
 		curValues.append((it, newVal))
 
 
-class QuickNavItem(object, metaclass=ABCMeta):
+class QuickNavItem(metaclass=ABCMeta):
 	"""Emitted by L{BrowseModeTreeInterceptor._iterNodesByType}, this represents one of many positions in a browse mode document, based on the type of item being searched for (e.g. link, heading, table etc)."""
 
 	itemType = None  #: The type of items searched for (e.g. link, heading, table etc)
@@ -194,7 +190,7 @@ class TextInfoQuickNavItem(QuickNavItem):
 		"""
 		self.textInfo = textInfo
 		self.outputReason = outputReason
-		super(TextInfoQuickNavItem, self).__init__(itemType, document)
+		super().__init__(itemType, document)
 
 	def __lt__(self, other):
 		return self.textInfo.compareEndPoints(other.textInfo, "startToStart") < 0
@@ -208,14 +204,14 @@ class TextInfoQuickNavItem(QuickNavItem):
 		return self.textInfo.text.strip()
 
 	def isChild(self, parent):
-		if parent.textInfo.isOverlapping(self.textInfo):
+		if parent.textInfo.isOverlapping(self.textInfo):  # noqa: SIM103
 			return True
 		return False
 
 	def report(self, readUnit=None):
 		info = self.textInfo
 		# If we are dealing with a form field, ensure we don't read the whole content if it's an editable text.
-		if self.itemType == "formField":
+		if self.itemType == "formField":  # noqa: SIM102
 			if self.obj.role == controlTypes.Role.EDITABLETEXT:
 				readUnit = textInfos.UNIT_LINE
 		if readUnit:
@@ -246,7 +242,7 @@ class TextInfoQuickNavItem(QuickNavItem):
 		caret = self.document.makeTextInfo(textInfos.POSITION_CARET)
 		return self.textInfo.compareEndPoints(caret, "startToStart") > 0
 
-	def _getLabelForProperties(self, labelPropertyGetter: Callable[[str], Optional[Any]]):
+	def _getLabelForProperties(self, labelPropertyGetter: Callable[[str], Any]):
 		"""
 		Fetches required properties for this L{TextInfoQuickNavItem} and constructs a label to be shown in an elements list.
 		This can be used by subclasses to implement the L{label} property.
@@ -268,7 +264,7 @@ class TextInfoQuickNavItem(QuickNavItem):
 			# Example output: main menu; navigation
 			labelParts = (name, landmark)
 		else:
-			role: Union[controlTypes.Role, int] = labelPropertyGetter("role")
+			role: controlTypes.Role | int = labelPropertyGetter("role")
 			role = controlTypes.Role(role)
 			roleText = role.displayString
 			# Translators: Reported label in the elements list for an element which which has no name and value
@@ -304,6 +300,15 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 	scriptCategory = inputCore.SCRCAT_BROWSEMODE
 	_disableAutoPassThrough = False
 	APPLICATION_ROLES = (controlTypes.Role.APPLICATION, controlTypes.Role.DIALOG)
+	documentURL: str | None = None
+	"""The URL of the current browse mode document.
+	C{None} when there is no URL or it is unknown.
+	Used to determine the type of a link in the document.
+	"""
+
+	def getLinkTypeInDocument(self, url: str) -> controlTypes.State | None:
+		"""Returns the type of a link in the document, or C{None} if the link type cannot be determined."""
+		return urlUtils.getLinkType(url, self.documentURL)
 
 	def _get_currentNVDAObject(self):
 		raise NotImplementedError
@@ -358,7 +363,7 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 		},
 	)
 
-	def shouldPassThrough(self, obj, reason: Optional[OutputReason] = None):
+	def shouldPassThrough(self, obj, reason: OutputReason | None = None):
 		"""Determine whether pass through mode should be enabled (focus mode) or disabled (browse mode) for a given object.
 		@param obj: The object in question.
 		@type obj: L{NVDAObjects.NVDAObject}
@@ -434,11 +439,20 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 		return config.conf["virtualBuffers"]["trapNonCommandGestures"]
 
 	def script_trapNonCommandGesture(self, gesture):
-		winsound.PlaySound("default", 1)
+		winsound.MessageBeep()
 
 	singleLetterNavEnabled = True  #: Whether single letter navigation scripts should be active (true) or if these letters should fall to the application.
 
 	def getAlternativeScript(self, gesture, script):
+		"""Replace the script bound to a gesture before it is queued for execution.
+
+		This method is called on the input hook thread while the script for a gesture is being resolved.
+
+		:param gesture: The triggering gesture.
+		:param script: The script bound to the gesture, or ``None`` if there is none.
+		:return: The script to queue, which may be the one that was passed in,
+			or ``None`` to pass the gesture on to the application.
+		"""
 		if self.passThrough or not gesture.isCharacter:
 			return script
 		if not self.singleLetterNavEnabled:
@@ -488,17 +502,17 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 		kind: str,
 		direction: documentBase._Movement = documentBase._Movement.NEXT,
 		pos: textInfos.TextInfo | None = None,
-	) -> Generator[TextInfoQuickNavItem, None, None]:
+	) -> Generator[TextInfoQuickNavItem]:
 		raise NotImplementedError
 
 	def _iterSimilarParagraph(
 		self,
 		kind: str,
-		paragraphFunction: Callable[[textInfos.TextInfo], Optional[Any]],
-		desiredValue: Optional[Any],
+		paragraphFunction: Callable[[textInfos.TextInfo], Any],
+		desiredValue: Any,
 		direction: _Movement,
 		pos: textInfos.TextInfo,
-	) -> Generator[TextInfoQuickNavItem, None, None]:
+	) -> Generator[TextInfoQuickNavItem]:
 		raise NotImplementedError
 
 	def _quickNavScript(self, gesture, itemType, direction, errorMessage, readUnit):
@@ -515,7 +529,7 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 			def iterFactory(
 				direction: str,
 				pos: textInfos.TextInfo,
-			) -> Generator[TextInfoQuickNavItem, None, None]:
+			) -> Generator[TextInfoQuickNavItem]:
 				return self._iterSimilarParagraph(
 					kind="textParagraph",
 					paragraphFunction=paragraphFunc,
@@ -534,7 +548,7 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 			def iterFactory(
 				direction: str,
 				pos: textInfos.TextInfo,
-			) -> Generator[TextInfoQuickNavItem, None, None]:
+			) -> Generator[TextInfoQuickNavItem]:
 				return self._iterSimilarParagraph(
 					kind="verticalParagraph",
 					paragraphFunction=paragraphFunc,
@@ -547,10 +561,10 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 			def iterFactory(
 				direction: documentBase._Movement,
 				info: textInfos.TextInfo | None,
-			) -> Generator[TextInfoQuickNavItem, None, None]:
+			) -> Generator[TextInfoQuickNavItem]:
 				return self._iterTextStyle(itemType, direction, info)
 		else:
-			iterFactory = lambda direction, info: self._iterNodesByType(itemType, direction, info)  # noqa: E731
+			iterFactory = lambda direction, info: self._iterNodesByType(itemType, direction, info)
 		info = self.selection
 		try:
 			item = next(iterFactory(direction, info))
@@ -572,51 +586,88 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 	def addQuickNav(
 		cls,
 		itemType: str,
-		key: Optional[str],
+		key: str | None,
 		nextDoc: str,
 		nextError: str,
 		prevDoc: str,
 		prevError: str,
-		readUnit: Optional[str] = None,
+		readUnit: str | None = None,
+		touchLabel: str | None = None,
 	):
 		"""Adds a script for the given quick nav item.
-		@param itemType: The type of item, I.E. "heading" "Link" ...
-		@param key: The quick navigation key to bind to the script.
-			Shift is automatically added for the previous item gesture. E.G. h for heading.
-			If C{None} is provided, the script is unbound by default.
-		@param nextDoc: The command description to bind to the script that yields the next quick nav item.
-		@param nextError: The error message if there are no more quick nav items of type itemType in this direction.
-		@param prevDoc: The command description to bind to the script that yields the previous quick nav item.
-		@param prevError: The error message if there are no more quick nav items of type itemType in this direction.
-		@param readUnit: The unit (one of the textInfos.UNIT_* constants) to announce when moving to this type of item.
+
+		:param itemType: The type of item, e.g. ``"heading"``, ``"link"``.
+		:param key: The quick navigation key to bind to the script.
+			Shift is automatically added for the previous item gesture, e.g. ``h`` for heading.
+			If ``None``, the script is unbound by default.
+		:param nextDoc: The command description for the script that moves to the next quick nav item.
+		:param nextError: The error message if there are no more quick nav items of this type in the forward direction.
+		:param prevDoc: The command description for the script that moves to the previous quick nav item.
+		:param prevError: The error message if there are no more quick nav items of this type in the backward direction.
+		:param readUnit: The unit (one of the ``textInfos.UNIT_*`` constants) to announce when moving to this type of item.
 			For example, only the line is read when moving to tables to avoid reading a potentially massive table.
-			If None, the entire item will be announced.
+			If ``None``, the entire item will be announced.
+		:param touchLabel: A short, translated, plural label for this element type used in browse mode touch navigation
+			cycling (e.g. ``_("links")``). If ``None``, the element type is not registered for browse mode touch navigation.
 		"""
 		scriptSuffix = itemType[0].upper() + itemType[1:]
-		scriptName = "next%s" % scriptSuffix
-		funcName = "script_%s" % scriptName
-		script = lambda self, gesture: self._quickNavScript(gesture, itemType, "next", nextError, readUnit)  # noqa: E731
+		scriptName = "next%s" % scriptSuffix  # noqa: UP031
+		funcName = "script_%s" % scriptName  # noqa: UP031
+		script = lambda self, gesture: self._quickNavScript(gesture, itemType, "next", nextError, readUnit)
 		script.__doc__ = nextDoc
 		script.__name__ = funcName
 		script.resumeSayAllMode = sayAll.CURSOR.CARET
 		setattr(cls, funcName, script)
 		if key is not None:
-			cls.__gestures["kb:%s" % key] = scriptName
-		scriptName = "previous%s" % scriptSuffix
-		funcName = "script_%s" % scriptName
-		script = lambda self, gesture: self._quickNavScript(  # noqa: E731
+			cls.__gestures["kb:%s" % key] = scriptName  # noqa: UP031
+		scriptName = "previous%s" % scriptSuffix  # noqa: UP031
+		funcName = "script_%s" % scriptName  # noqa: UP031
+		script = lambda self, gesture: self._quickNavScript(
 			gesture,
 			itemType,
 			"previous",
 			prevError,
 			readUnit,
-		)  # noqa: E731
+		)
 		script.__doc__ = prevDoc
 		script.__name__ = funcName
 		script.resumeSayAllMode = sayAll.CURSOR.CARET
 		setattr(cls, funcName, script)
 		if key is not None:
-			cls.__gestures["kb:shift+%s" % key] = scriptName
+			cls.__gestures["kb:shift+%s" % key] = scriptName  # noqa: UP031
+		if touchLabel is not None:
+			cls._browseTouchNavRegistry.append((itemType, touchLabel))
+
+	@classmethod
+	def _addQuickNavHeading(
+		cls,
+		levelRange: range,
+	):
+		for i in levelRange:
+			if not (0 < i < 10):
+				log.error(
+					f"Could not add quick navigation key for heading level {i}; only levels 1 to 9 supported.",
+				)
+				continue
+			cls.addQuickNav(
+				f"heading{i}",
+				key=f"{i}",
+				# Translators: Input help message for a quick navigation command in browse mode.
+				# {i} will be replaced with the level number.
+				nextDoc=_("Moves to the next heading at level {i}").format(i=i),
+				# Translators: Message presented when the browse mode element is not found.
+				# {i} will be replaced with the level number.
+				nextError=_("No next heading at level {i}").format(i=i),
+				# Translators: Input help message for a quick navigation command in browse mode.
+				# {i} will be replaced with the level number.
+				prevDoc=_("Moves to the previous heading at level {i}").format(i=i),
+				# Translators: Message presented when the browse mode element is not found.
+				# {i} will be replaced with the level number.
+				prevError=_("No previous heading at level {i}").format(i=i),
+				# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+				# {i} will be replaced with the heading level number.
+				touchLabel=_("headings level {i}").format(i=i),
+			)
 
 	def script_elementsList(self, gesture):
 		# We need this to be a modal dialog, but it mustn't block this script.
@@ -670,7 +721,7 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 			import mathPres
 
 			try:
-				return mathPres.interactWithMathMl(obj.mathMl)
+				return mathPres.interactWithMathMl(obj.mathMl, sourceObj=obj)
 			except (NotImplementedError, LookupError):
 				pass
 			return
@@ -684,11 +735,8 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 		else:
 			self._activateNVDAObject(obj)
 
-	def script_activatePosition(self, gesture):
-		if config.conf["virtualBuffers"]["autoFocusFocusableElements"]:
-			self._activatePosition()
-		else:
-			self._focusLastFocusableObject(activatePosition=True)
+	def script_activatePosition(self, gesture: inputCore.InputGesture) -> None:
+		self._focusLastFocusableObject(activatePosition=True)
 
 	# Translators: the description for the activatePosition script on browseMode documents.
 	script_activatePosition.__doc__ = _("Activates the current object in the document")
@@ -715,10 +763,9 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 			# Make sure we activate the object at the caret, which is not necessarily focusable.
 			self._activatePosition()
 
-	def script_passThrough(self, gesture):
-		if not config.conf["virtualBuffers"]["autoFocusFocusableElements"]:
-			self._focusLastFocusableObject()
-			api.processPendingEvents(processEventQueue=True)
+	def script_passThrough(self, gesture: inputCore.InputGesture) -> None:
+		self._focusLastFocusableObject()
+		api.processPendingEvents(processEventQueue=True)
 		gesture.send()
 
 	def script_disablePassThrough(self, gesture):
@@ -734,20 +781,117 @@ class BrowseModeTreeInterceptor(treeInterceptorHandler.TreeInterceptor):
 
 	script_disablePassThrough.ignoreTreeInterceptorPassThrough = True
 
-	def _set_disableAutoPassThrough(self, state):
+	def _set_disableAutoPassThrough(self, state: bool):
 		# If the user manually switches to focus mode with NVDA+space, that enables
-		# pass-through and disables auto pass-through. If auto focusing of focusable
-		# elements is disabled, NVDA won't have synced the focus to the browse mode
-		# cursor. However, since the user is switching to focus mode, they probably
+		# pass-through and disables auto pass-through.
+		# NVDA doesn't automatically sync the focus to the browse mode
+		# cursor, however, since the user is switching to focus mode, they probably
 		# want to interact with the focus, so sync the focus here.
-		if state and not config.conf["virtualBuffers"]["autoFocusFocusableElements"] and self.passThrough:
+		if state and self.passThrough:
 			self._focusLastFocusableObject()
 		self._disableAutoPassThrough = state
 
 	def _get_disableAutoPassThrough(self):
 		return self._disableAutoPassThrough
 
-	__gestures = {
+	#: Registry of (itemType, label) pairs populated dynamically by :meth:`addQuickNav`.
+	#: Do not modify directly; pass a touchLabel to :meth:`addQuickNav`.
+	_browseTouchNavRegistry: list[tuple[str, str]] = []  # noqa: RUF012
+
+	#: The itemType currently selected for browse mode touch navigation. None means "default" (all content).
+	#: Stored as an instance attribute so each document remembers its own preference.
+	_browseModeCurrentType: str | None = None
+
+	def _enabledBrowseElements(self) -> list[tuple[str | None, str]]:
+		"""Returns the list of (itemType, label) pairs available for browse mode touch navigation cycling.
+
+		The ``None`` entry (navigate all content) is always first.
+		Remaining entries are those whose itemType appears in the
+		:confval:`virtualBuffers.browseModeTouchNavigationElements` config list.
+
+		:return: List of (itemType, label) pairs, with ``None`` meaning "all content".
+		"""
+		enabledTypes = set(config.conf["virtualBuffers"]["browseModeTouchNavigationElements"])
+		# Translators: The default element type in browse mode touch navigation (navigates all content).
+		result: list[tuple[str | None, str]] = [(None, _("default"))]
+		for itemType, label in type(self)._browseTouchNavRegistry:
+			if itemType in enabledTypes:
+				result.append((itemType, label))
+		return result
+
+	@script(
+		description=_(
+			# Translators: Input help message for a browse mode touch navigation command in browse mode.
+			"Selects the next element type for browse mode touch navigation",
+		),
+		category=inputCore.SCRCAT_BROWSEMODE,
+		gesture="ts(browse):flickDown",
+	)
+	def script_nextBrowseElement(self, gesture: inputCore.InputGesture) -> None:
+		enabled = self._enabledBrowseElements()
+		types = [itemType for itemType, _label in enabled]
+		try:
+			idx = types.index(self._browseModeCurrentType)
+		except ValueError:
+			idx = -1
+		idx = (idx + 1) % len(enabled)
+		self._browseModeCurrentType = enabled[idx][0]
+		ui.message(enabled[idx][1])
+
+	@script(
+		description=_(
+			# Translators: Input help message for a browse mode touch navigation command in browse mode.
+			"Selects the previous element type for browse mode touch navigation",
+		),
+		category=inputCore.SCRCAT_BROWSEMODE,
+		gesture="ts(browse):flickUp",
+	)
+	def script_prevBrowseElement(self, gesture: inputCore.InputGesture) -> None:
+		enabled = self._enabledBrowseElements()
+		types = [itemType for itemType, _label in enabled]
+		try:
+			idx = types.index(self._browseModeCurrentType)
+		except ValueError:
+			idx = 0
+		idx = (idx - 1) % len(enabled)
+		self._browseModeCurrentType = enabled[idx][0]
+		ui.message(enabled[idx][1])
+
+	@script(
+		description=_(
+			# Translators: Input help message for a browse mode touch navigation command in browse mode.
+			"Moves to the next element of the selected type in browse mode touch navigation",
+		),
+		category=inputCore.SCRCAT_BROWSEMODE,
+		gesture="ts(browse):flickRight",
+	)
+	def script_nextSelectedElement(self, gesture: inputCore.InputGesture) -> None:
+		itemType = self._browseModeCurrentType
+		if itemType is None:
+			import globalCommands
+
+			globalCommands.commands.script_navigatorObject_nextInFlow(gesture)
+		else:
+			getattr(self, f"script_next{itemType[0].upper()}{itemType[1:]}")(gesture)
+
+	@script(
+		description=_(
+			# Translators: Input help message for a browse mode touch navigation command in browse mode.
+			"Moves to the previous element of the selected type in browse mode touch navigation",
+		),
+		category=inputCore.SCRCAT_BROWSEMODE,
+		gesture="ts(browse):flickLeft",
+	)
+	def script_prevSelectedElement(self, gesture: inputCore.InputGesture) -> None:
+		itemType = self._browseModeCurrentType
+		if itemType is None:
+			import globalCommands
+
+			globalCommands.commands.script_navigatorObject_previousInFlow(gesture)
+		else:
+			getattr(self, f"script_previous{itemType[0].upper()}{itemType[1:]}")(gesture)
+
+	__gestures = {  # noqa: RUF012
 		"kb:NVDA+f7": "elementsList",
 		"kb:enter": "activatePosition",
 		"kb:numpadEnter": "activatePosition",
@@ -781,79 +925,10 @@ qn(
 	prevDoc=_("moves to the previous heading"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous heading"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("headings"),
 )
-qn(
-	"heading1",
-	key="1",
-	# Translators: Input help message for a quick navigation command in browse mode.
-	nextDoc=_("moves to the next heading at level 1"),
-	# Translators: Message presented when the browse mode element is not found.
-	nextError=_("no next heading at level 1"),
-	# Translators: Input help message for a quick navigation command in browse mode.
-	prevDoc=_("moves to the previous heading at level 1"),
-	# Translators: Message presented when the browse mode element is not found.
-	prevError=_("no previous heading at level 1"),
-)
-qn(
-	"heading2",
-	key="2",
-	# Translators: Input help message for a quick navigation command in browse mode.
-	nextDoc=_("moves to the next heading at level 2"),
-	# Translators: Message presented when the browse mode element is not found.
-	nextError=_("no next heading at level 2"),
-	# Translators: Input help message for a quick navigation command in browse mode.
-	prevDoc=_("moves to the previous heading at level 2"),
-	# Translators: Message presented when the browse mode element is not found.
-	prevError=_("no previous heading at level 2"),
-)
-qn(
-	"heading3",
-	key="3",
-	# Translators: Input help message for a quick navigation command in browse mode.
-	nextDoc=_("moves to the next heading at level 3"),
-	# Translators: Message presented when the browse mode element is not found.
-	nextError=_("no next heading at level 3"),
-	# Translators: Input help message for a quick navigation command in browse mode.
-	prevDoc=_("moves to the previous heading at level 3"),
-	# Translators: Message presented when the browse mode element is not found.
-	prevError=_("no previous heading at level 3"),
-)
-qn(
-	"heading4",
-	key="4",
-	# Translators: Input help message for a quick navigation command in browse mode.
-	nextDoc=_("moves to the next heading at level 4"),
-	# Translators: Message presented when the browse mode element is not found.
-	nextError=_("no next heading at level 4"),
-	# Translators: Input help message for a quick navigation command in browse mode.
-	prevDoc=_("moves to the previous heading at level 4"),
-	# Translators: Message presented when the browse mode element is not found.
-	prevError=_("no previous heading at level 4"),
-)
-qn(
-	"heading5",
-	key="5",
-	# Translators: Input help message for a quick navigation command in browse mode.
-	nextDoc=_("moves to the next heading at level 5"),
-	# Translators: Message presented when the browse mode element is not found.
-	nextError=_("no next heading at level 5"),
-	# Translators: Input help message for a quick navigation command in browse mode.
-	prevDoc=_("moves to the previous heading at level 5"),
-	# Translators: Message presented when the browse mode element is not found.
-	prevError=_("no previous heading at level 5"),
-)
-qn(
-	"heading6",
-	key="6",
-	# Translators: Input help message for a quick navigation command in browse mode.
-	nextDoc=_("moves to the next heading at level 6"),
-	# Translators: Message presented when the browse mode element is not found.
-	nextError=_("no next heading at level 6"),
-	# Translators: Input help message for a quick navigation command in browse mode.
-	prevDoc=_("moves to the previous heading at level 6"),
-	# Translators: Message presented when the browse mode element is not found.
-	prevError=_("no previous heading at level 6"),
-)
+BrowseModeTreeInterceptor._addQuickNavHeading(range(1, 10))
 qn(
 	"table",
 	key="t",
@@ -866,6 +941,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous table"),
 	readUnit=textInfos.UNIT_LINE,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("tables"),
 )
 qn(
 	"link",
@@ -878,6 +955,8 @@ qn(
 	prevDoc=_("moves to the previous link"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous link"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("links"),
 )
 qn(
 	"visitedLink",
@@ -890,6 +969,8 @@ qn(
 	prevDoc=_("moves to the previous visited link"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous visited link"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("visited links"),
 )
 qn(
 	"unvisitedLink",
@@ -902,6 +983,8 @@ qn(
 	prevDoc=_("moves to the previous unvisited link"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous unvisited link"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("unvisited links"),
 )
 qn(
 	"formField",
@@ -914,6 +997,8 @@ qn(
 	prevDoc=_("moves to the previous form field"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous form field"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("form fields"),
 )
 qn(
 	"list",
@@ -927,6 +1012,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous list"),
 	readUnit=textInfos.UNIT_LINE,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("lists"),
 )
 qn(
 	"listItem",
@@ -939,6 +1026,8 @@ qn(
 	prevDoc=_("moves to the previous list item"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous list item"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("list items"),
 )
 qn(
 	"button",
@@ -951,6 +1040,8 @@ qn(
 	prevDoc=_("moves to the previous button"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous button"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("buttons"),
 )
 qn(
 	"edit",
@@ -964,6 +1055,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous edit field"),
 	readUnit=textInfos.UNIT_LINE,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("edit fields"),
 )
 qn(
 	"frame",
@@ -977,6 +1070,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous frame"),
 	readUnit=textInfos.UNIT_LINE,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("frames"),
 )
 qn(
 	"separator",
@@ -989,6 +1084,8 @@ qn(
 	prevDoc=_("moves to the previous separator"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous separator"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("separators"),
 )
 qn(
 	"radioButton",
@@ -1001,6 +1098,8 @@ qn(
 	prevDoc=_("moves to the previous radio button"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous radio button"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("radio buttons"),
 )
 qn(
 	"comboBox",
@@ -1013,6 +1112,8 @@ qn(
 	prevDoc=_("moves to the previous combo box"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous combo box"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("combo boxes"),
 )
 qn(
 	"checkBox",
@@ -1025,6 +1126,8 @@ qn(
 	prevDoc=_("moves to the previous check box"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous check box"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("check boxes"),
 )
 qn(
 	"graphic",
@@ -1037,6 +1140,8 @@ qn(
 	prevDoc=_("moves to the previous graphic"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous graphic"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("graphics"),
 )
 qn(
 	"blockQuote",
@@ -1049,6 +1154,8 @@ qn(
 	prevDoc=_("moves to the previous block quote"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous block quote"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("block quotes"),
 )
 qn(
 	"notLinkBlock",
@@ -1062,6 +1169,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no more text before a block of links"),
 	readUnit=textInfos.UNIT_LINE,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("non-link blocks"),
 )
 qn(
 	"landmark",
@@ -1075,6 +1184,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous landmark"),
 	readUnit=textInfos.UNIT_LINE,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("landmarks"),
 )
 qn(
 	"embeddedObject",
@@ -1087,6 +1198,8 @@ qn(
 	prevDoc=_("moves to the previous embedded object"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous embedded object"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("embedded objects"),
 )
 qn(
 	"annotation",
@@ -1099,6 +1212,8 @@ qn(
 	prevDoc=_("moves to the previous annotation"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous annotation"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("annotations"),
 )
 qn(
 	"error",
@@ -1111,6 +1226,37 @@ qn(
 	prevDoc=_("moves to the previous error"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous error"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("errors"),
+)
+qn(
+	"slider",
+	key=None,
+	# Translators: Input help message for a quick navigation command in browse mode.
+	nextDoc=_("moves to the next slider"),
+	# Translators: Message presented when the browse mode element is not found.
+	nextError=_("no next slider"),
+	# Translators: Input help message for a quick navigation command in browse mode.
+	prevDoc=_("moves to the previous slider"),
+	# Translators: Message presented when the browse mode element is not found.
+	prevError=_("no previous slider"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("sliders"),
+)
+qn(
+	"clickable",
+	key=None,
+	# Translators: Input help message for a quick navigation command in browse mode.
+	nextDoc=_("moves to the next clickable element"),
+	# Translators: Message presented when the browse mode element is not found.
+	nextError=_("no next clickable element"),
+	# Translators: Input help message for a quick navigation command in browse mode.
+	prevDoc=_("moves to the previous clickable element"),
+	# Translators: Message presented when the browse mode element is not found.
+	prevError=_("no previous clickable element"),
+	readUnit=textInfos.UNIT_LINE,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("clickable elements"),
 )
 qn(
 	"article",
@@ -1123,6 +1269,8 @@ qn(
 	prevDoc=_("moves to the previous article"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous article"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("articles"),
 )
 qn(
 	"grouping",
@@ -1135,6 +1283,8 @@ qn(
 	prevDoc=_("moves to the previous grouping"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous grouping"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("groupings"),
 )
 qn(
 	"tab",
@@ -1147,6 +1297,8 @@ qn(
 	prevDoc=_("moves to the previous tab"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous tab"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("tabs"),
 )
 qn(
 	"figure",
@@ -1159,6 +1311,8 @@ qn(
 	prevDoc=_("moves to the previous figure"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous figure"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("figures"),
 )
 qn(
 	"menuItem",
@@ -1171,6 +1325,8 @@ qn(
 	prevDoc=_("moves to the previous menu item"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous menu item"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("menu items"),
 )
 qn(
 	"toggleButton",
@@ -1183,6 +1339,8 @@ qn(
 	prevDoc=_("moves to the previous toggle button"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous toggle button"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("toggle buttons"),
 )
 qn(
 	"progressBar",
@@ -1195,6 +1353,8 @@ qn(
 	prevDoc=_("moves to the previous progress bar"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous progress bar"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("progress bars"),
 )
 qn(
 	"math",
@@ -1207,6 +1367,8 @@ qn(
 	prevDoc=_("moves to the previous math formula"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous math formula"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("math formulas"),
 )
 qn(
 	"textParagraph",
@@ -1220,6 +1382,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous text paragraph"),
 	readUnit=textInfos.UNIT_PARAGRAPH,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("text paragraphs"),
 )
 qn(
 	"verticalParagraph",
@@ -1233,6 +1397,8 @@ qn(
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("no previous vertically aligned paragraph"),
 	readUnit=textInfos.UNIT_PARAGRAPH,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("vertical paragraphs"),
 )
 qn(
 	"sameStyle",
@@ -1245,6 +1411,8 @@ qn(
 	prevDoc=_("moves to the previous same style text"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("No previous same style text"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("same style"),
 )
 qn(
 	"differentStyle",
@@ -1257,8 +1425,30 @@ qn(
 	prevDoc=_("moves to the previous different style text"),
 	# Translators: Message presented when the browse mode element is not found.
 	prevError=_("No previous different style text"),
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("different style"),
+)
+qn(
+	"reference",
+	key=None,
+	# Translators: Input help message for a quick navigation command in browse mode.
+	nextDoc=_("moves to the next reference"),
+	# Translators: Message presented when the browse mode element is not found.
+	nextError=_("no next reference"),
+	# Translators: Input help message for a quick navigation command in browse mode.
+	prevDoc=_("moves to the previous reference"),
+	# Translators: Message presented when the browse mode element is not found.
+	prevError=_("no previous reference"),
+	readUnit=textInfos.UNIT_WORD,
+	# Translators: Label announced when cycling browse mode touch navigation element types in browse mode.
+	touchLabel=_("references"),
 )
 del qn
+
+# Build _browseModeElements dynamically from the registry populated by addQuickNav calls above.
+BrowseModeTreeInterceptor._browseModeElements: tuple[tuple[str, str], ...] = (
+	*BrowseModeTreeInterceptor._browseTouchNavRegistry,
+)
 
 
 class ElementsListDialog(
@@ -1288,6 +1478,8 @@ class ElementsListDialog(
 	Element = collections.namedtuple("Element", ("item", "parent"))
 
 	lastSelectedElementType = 0
+
+	shouldSuspendConfigProfileTriggers = True
 
 	def __init__(self, document):
 		super().__init__(
@@ -1335,8 +1527,7 @@ class ElementsListDialog(
 		# in the browse mode Elements List dialog.
 		filterText = _("Filter b&y:")
 		labeledCtrl = gui.guiHelper.LabeledControlHelper(self, filterText, wx.TextCtrl)
-		self.filterEdit = cast(wx.TextCtrl, labeledCtrl.control)
-		self.filterTimer: Optional[wx.CallLater] = None
+		self.filterEdit = labeledCtrl.control
 		self.filterEdit.Bind(wx.EVT_TEXT, self.onFilterEditTextChange)
 		contentsSizer.Add(labeledCtrl.sizer)
 		contentsSizer.AddSpacer(gui.guiHelper.SPACE_BETWEEN_VERTICAL_DIALOG_ITEMS)
@@ -1498,7 +1689,6 @@ class ElementsListDialog(
 		elif key == wx.WXK_F2:
 			item = self.tree.GetSelection()
 			if item:
-				selectedItemType = self.tree.GetItemData(item).item  # noqa: F841
 				self.tree.EditLabel(item)
 				evt.Skip()
 
@@ -1566,19 +1756,23 @@ class ElementsListDialog(
 			childItem = self.tree.GetFirstChild(item)[0]
 			if childItem and self.tree.IsExpanded(item):
 				# Has children and is reachable, so recurse.
-				for childItem in self._iterReachableTreeItemsFromItem(childItem):
+				for childItem in self._iterReachableTreeItemsFromItem(childItem):  # noqa: B020
 					yield childItem
 
 			item = self.tree.GetNextSibling(item)
 
 	FILTER_TIMER_DELAY_MS = 300
 
+	@debounceLimiter(
+		cooldownTimeMs=FILTER_TIMER_DELAY_MS,
+		delayTimeMs=FILTER_TIMER_DELAY_MS,
+		runImmediateFirstCall=False,
+	)
+	def _scheduleFilter(self, filterText: str) -> None:
+		self.filter(filterText)
+
 	def onFilterEditTextChange(self, evt: wx.CommandEvent) -> None:
-		filter = self.filterEdit.GetValue()
-		if self.filterTimer is None:
-			self.filterTimer = wx.CallLater(self.FILTER_TIMER_DELAY_MS, self.filter, filter)
-		else:
-			self.filterTimer.Start(self.FILTER_TIMER_DELAY_MS, filter)
+		self._scheduleFilter(self.filterEdit.GetValue())
 		evt.Skip()
 
 	def onAction(self, activate):
@@ -1632,11 +1826,11 @@ class BrowseModeDocumentTreeInterceptor(
 	programmaticScrollMayFireEvent = False
 
 	def __init__(self, obj):
-		super(BrowseModeDocumentTreeInterceptor, self).__init__(obj)
+		super().__init__(obj)
 		self._lastProgrammaticScrollTime = None
 		# Cache the document constant identifier so it can be saved with the last caret position on termination.
 		# As the original property may not be available as the document will be already dead.
-		self._lastCachedDocumentConstantIdentifier: Optional[str] = self.documentConstantIdentifier
+		self._lastCachedDocumentConstantIdentifier: str | None = self.documentConstantIdentifier
 		self._lastFocusObj = None
 		self._objPendingFocusBeforeActivate = None
 		self._hadFirstGainFocus = False
@@ -1666,6 +1860,8 @@ class BrowseModeDocumentTreeInterceptor(
 		doSayAll = False
 		hadFirstGainFocus = self._hadFirstGainFocus
 		if not hadFirstGainFocus:
+			if config.conf["virtualBuffers"]["nativeSelectionMode"]:
+				self._initialize_nativeAppSelectionModeSupport()
 			# This treeInterceptor is gaining focus for the first time.
 			# Fake a focus event on the focus object, as the treeInterceptor may have missed the actual focus event.
 			focus = api.getFocusObject()
@@ -1739,10 +1935,10 @@ class BrowseModeDocumentTreeInterceptor(
 			obj = info.NVDAObjectAtStart
 			if not obj:
 				return
-		super(BrowseModeDocumentTreeInterceptor, self)._activatePosition(obj=obj)
+		super()._activatePosition(obj=obj)
 
 	def _set_selection(self, info, reason=OutputReason.CARET):
-		super(BrowseModeDocumentTreeInterceptor, self)._set_selection(info)
+		super()._set_selection(info)
 		if isScriptWaiting() or not info.isCollapsed:
 			return
 		# Save the last caret position for use in terminate().
@@ -1779,20 +1975,14 @@ class BrowseModeDocumentTreeInterceptor(
 				self._lastProgrammaticScrollTime = time.time()
 		if focusObj:
 			self.passThrough = self.shouldPassThrough(focusObj, reason=reason)
-			if (
+			if (  # noqa: SIM102
 				not eventHandler.isPendingEvents("gainFocus")
 				and focusObj != self.rootNVDAObject
 				and focusObj != api.getFocusObject()
 				and self._shouldSetFocusToObj(focusObj)
 			):
-				followBrowseModeFocus = config.conf["virtualBuffers"]["autoFocusFocusableElements"]
-				if followBrowseModeFocus or self.passThrough:
+				if self.passThrough:
 					focusObj.setFocus()
-					# Track this object as NVDA having just requested setting focus to it
-					# So that when NVDA does receive the focus event for it
-					# It can handle it quietly rather than speaking the new focus.
-					if followBrowseModeFocus:
-						self._objPendingFocusBeforeActivate = obj
 			# Queue the reporting of pass through mode so that it will be spoken after the actual content.
 			queueHandler.queueFunction(queueHandler.eventQueue, reportPassThrough, self)
 
@@ -1854,12 +2044,9 @@ class BrowseModeDocumentTreeInterceptor(
 	currentExpandedControl = None  #: an NVDAObject representing the control that has just been expanded with the collapseOrExpandControl script.
 
 	def script_collapseOrExpandControl(self, gesture: inputCore.InputGesture):
-		if not config.conf["virtualBuffers"]["autoFocusFocusableElements"]:
-			self._focusLastFocusableObject()
-			# Give the application time to focus the control.
-			core.callLater(100, self._collapseOrExpandControl_scriptHelper, gesture)
-		else:
-			self._collapseOrExpandControl_scriptHelper(gesture)
+		self._focusLastFocusableObject()
+		# Give the application time to focus the control.
+		core.callLater(100, self._collapseOrExpandControl_scriptHelper, gesture)
 
 	def _collapseOrExpandControl_scriptHelper(self, gesture: inputCore.InputGesture):
 		oldFocus = api.getFocusObject()
@@ -1874,6 +2061,62 @@ class BrowseModeDocumentTreeInterceptor(
 		elif not self.disableAutoPassThrough:
 			self.passThrough = False
 		reportPassThrough(self)
+
+	_EXPAND_OR_POPUP_STATES = frozenset(
+		{
+			controlTypes.State.COLLAPSED,
+			controlTypes.State.EXPANDED,
+			controlTypes.State.AUTOCOMPLETE,
+			controlTypes.State.HASPOPUP,
+			controlTypes.State.HASPOPUP_DIALOG,
+			controlTypes.State.HASPOPUP_GRID,
+			controlTypes.State.HASPOPUP_LIST,
+			controlTypes.State.HASPOPUP_TREE,
+		},
+	)
+	"""States indicating that a control consumes alt+upArrow and alt+downArrow itself."""
+
+	def _isExpandableControlAtCaret(self) -> bool:
+		"""Whether the focusable control at the caret handles alt+upArrow and alt+downArrow itself.
+
+		:return: ``True`` to collapse/expand the control, ``False`` to navigate by sentence.
+		"""
+		info = self.makeTextInfo(textInfos.POSITION_CARET)
+		info.expand(textInfos.UNIT_CHARACTER)
+		for field in reversed(info.getTextWithFields()):
+			if not (isinstance(field, textInfos.FieldCommand) and field.command == "controlStart"):
+				continue
+			states = field.field.get("states") or set()
+			if controlTypes.State.FOCUSABLE not in states:
+				continue
+			role = field.field.get("role")
+			return role in self.ALWAYS_SWITCH_TO_PASS_THROUGH_ROLES or not states.isdisjoint(
+				self._EXPAND_OR_POPUP_STATES,
+			)
+		return False
+
+	def getAlternativeScript(
+		self,
+		gesture: inputCore.InputGesture,
+		script: scriptHandler._ScriptFunctionT | None,
+	) -> scriptHandler._ScriptFunctionT | None:
+		"""Hand the sentence navigation gestures to the control at the caret when it takes them itself.
+
+		:param gesture: The triggering gesture.
+		:param script: The script bound to the gesture.
+		:return: The script to run instead, which may be the one that was passed in.
+		"""
+		if (
+			not self.passThrough
+			and script
+			in (
+				self.script_moveBySentence_back,
+				self.script_moveBySentence_forward,
+			)
+			and self._isExpandableControlAtCaret()
+		):
+			return self.script_collapseOrExpandControl
+		return super().getAlternativeScript(gesture, script)
 
 	def _tabOverride(self, direction):
 		"""Override the tab order if the virtual  caret is not within the currently focused node.
@@ -1965,7 +2208,7 @@ class BrowseModeDocumentTreeInterceptor(
 			try:
 				parent.event_focusEntered()
 			except:  # noqa: E722
-				log.exception("Error executing focusEntered event: %s" % parent)
+				log.exception("Error executing focusEntered event: %s" % parent)  # noqa: UP031
 
 	def event_gainFocus(self, obj, nextHandler):
 		enteringFromOutside = self._enteringFromOutside
@@ -1990,6 +2233,12 @@ class BrowseModeDocumentTreeInterceptor(
 			# and this was the last non-root node with focus, so ignore this focus event.
 			# Otherwise, if the user switches away and back to this document, the cursor will jump to this node.
 			# This is not ideal if the user was positioned over a node which cannot receive focus.
+			# #17501: Even though we're ignoring this event, we still need to call
+			# _postGainFocus. This does things such as initialize auto select detection
+			# for editable text controls. Without this, the focus object might not
+			# behave correctly (e.g. text selection changes might not be reported) if the
+			# user switches to focus mode with this object still focused.
+			self._postGainFocus(obj)
 			return
 		if obj == self.rootNVDAObject:
 			if self.passThrough:
@@ -2006,7 +2255,7 @@ class BrowseModeDocumentTreeInterceptor(
 			try:
 				states = self._lastFocusObj.states
 				previousFocusObjIsDefunct = controlTypes.State.DEFUNCT in states
-			except Exception:
+			except Exception:  # noqa: BLE001
 				log.debugWarning(
 					"Error fetching states when checking for defunct object. Treating object as defunct anyway.",
 					exc_info=True,
@@ -2035,15 +2284,6 @@ class BrowseModeDocumentTreeInterceptor(
 		if not self._hadFirstGainFocus or previousFocusObjIsDefunct:
 			# still initializing  or the old focus is dead.
 			isOverlapping = False
-		elif config.conf["virtualBuffers"]["autoFocusFocusableElements"]:
-			# if this focus event was caused by NVDA setting the focus itself
-			# Due to auto focus focusable elements option being enabled,
-			# And we detect that the caret was already positioned within the focus.
-			# Note that this is not the default and may be removed in future.
-			caretInfo = self.makeTextInfo(textInfos.POSITION_CARET)
-			# Expand to one character, as isOverlapping() doesn't treat, for example, (4,4) and (4,5) as overlapping.
-			caretInfo.expand(textInfos.UNIT_CHARACTER)
-			isOverlapping = focusInfo.isOverlapping(caretInfo)
 		else:
 			# if this focus event was caused by NVDA setting the focus itself
 			# due to activation or applications key etc.
@@ -2067,12 +2307,15 @@ class BrowseModeDocumentTreeInterceptor(
 				# we need to call it manually here.
 				vision.handler.handleGainFocus(obj)
 			else:
-				# Although we are going to speak the object rather than textInfo content, we still need to silently speak the textInfo content so that the textInfo speech cache is updated correctly.
-				# Not doing this would cause  later browseMode speaking to either not speak controlFields it had entered, or speak controlField exits after having already exited.
-				# See #7435 for a discussion on this.
-				speech.speakTextInfo(focusInfo, reason=OutputReason.ONLYCACHE)
 				self._replayFocusEnteredEvents()
 				nextHandler()
+				# Although we spoke the object rather than textInfo content, we still need to silently speak the textInfo content so that the textInfo speech cache is updated correctly.
+				# Not doing this would cause  later browseMode speaking to either not speak controlFields it had entered, or speak controlField exits after having already exited.
+				# See #7435 for a discussion on this.
+				# #17750: It's important that we do this *after* speaking the object.
+				# Otherwise, the cached info would prevent NVDA from detecting things like
+				# row and column changes.
+				speech.speakTextInfo(focusInfo, reason=OutputReason.ONLYCACHE)
 			focusInfo.collapse()
 			if self._focusEventMustUpdateCaretPosition:
 				self._set_selection(focusInfo, reason=OutputReason.FOCUS)
@@ -2082,12 +2325,7 @@ class BrowseModeDocumentTreeInterceptor(
 				# This focus change was caused by a virtual caret movement, so don't speak the focused node to avoid double speaking.
 				# However, we still want to update the speech property cache so that property changes will be spoken properly.
 				speech.speakObject(obj, OutputReason.ONLYCACHE)
-				if config.conf["virtualBuffers"]["autoFocusFocusableElements"]:
-					# As we do not call nextHandler which would trigger the vision framework to handle gain focus,
-					# we need to call it manually here.
-					# Note: this is usually called after the caret movement.
-					vision.handler.handleGainFocus(obj)
-				elif (
+				if (
 					objPendingFocusBeforeActivate
 					and obj == objPendingFocusBeforeActivate
 					and obj is not objPendingFocusBeforeActivate
@@ -2115,14 +2353,14 @@ class BrowseModeDocumentTreeInterceptor(
 
 	def _handleScrollTo(
 		self,
-		obj: Union[NVDAObject, textInfos.TextInfo],
+		obj: NVDAObject | textInfos.TextInfo,
 	) -> bool:
 		"""Handle scrolling the browseMode document to a given object in response to an event.
 		Subclasses should call this from an event which indicates that the document has scrolled.
-		@postcondition: The virtual caret is moved to L{obj} and the buffer content for L{obj} is reported.
-		@param obj: The object to which the document should scroll.
-		@return: C{True} if the document was scrolled, C{False} if not.
-		@note: If C{False} is returned, calling events should probably call their nextHandler.
+		- postcondition: The virtual caret is moved to *obj* and the buffer content for *obj* is reported.
+		:param obj: The object to which the document should scroll.
+		:return: ``True`` if the document was scrolled, ``False`` if not.
+		- note: If ``False`` is returned, calling events should probably call their ``nextHandler``.
 		"""
 		if (
 			self.programmaticScrollMayFireEvent
@@ -2142,15 +2380,16 @@ class BrowseModeDocumentTreeInterceptor(
 		elif isinstance(obj, textInfos.TextInfo):
 			scrollInfo = obj.copy()
 		else:
-			raise ValueError(f"{obj} is not a supported type")
+			raise ValueError(f"{obj} is not a supported type")  # noqa: TRY004
 
-		# We only want to update the caret and speak the field if we're not in the same one as before
+		# We only want to update the caret and speak the field if we're not in the first line of the same object as before.
+		# See #17669
+		scrollInfo.collapse()
+		scrollInfo.expand(textInfos.UNIT_LINE)
 		caretInfo = self.makeTextInfo(textInfos.POSITION_CARET)
 		# Expand to one character, as isOverlapping() doesn't treat, for example, (4,4) and (4,5) as overlapping.
 		caretInfo.expand(textInfos.UNIT_CHARACTER)
 		if not scrollInfo.isOverlapping(caretInfo):
-			if scrollInfo.isCollapsed:
-				scrollInfo.expand(textInfos.UNIT_LINE)
 			speech.speakTextInfo(scrollInfo, reason=OutputReason.CARET)
 			scrollInfo.collapse()
 			self.selection = scrollInfo
@@ -2224,13 +2463,13 @@ class BrowseModeDocumentTreeInterceptor(
 			obj = container
 		return doResult(False)
 
-	documentConstantIdentifier: Optional[str]
+	documentConstantIdentifier: str | None
 	""" Typing information for auto-property: _get_documentConstantIdentifier"""
 
 	# Mark documentConstantIdentifier property for caching during the current core cycle
 	_cache_documentConstantIdentifier = True
 
-	def _get_documentConstantIdentifier(self) -> Optional[str]:
+	def _get_documentConstantIdentifier(self) -> str | None:
 		"""Get the constant identifier for this document.
 		This identifier should uniquely identify all instances (not just one instance) of a document for at least the current session of the hosting application.
 		Generally, the document URL should be used.
@@ -2395,7 +2634,7 @@ class BrowseModeDocumentTreeInterceptor(
 
 		microsoftWordMode: bool = isinstance(self, (WordBrowseModeDocument, WordDocumentTreeInterceptor))
 		stack: list[textInfos.FormatField] = [{}]
-		result: "textInfos.TextInfo.TextWithFieldsT" = []
+		result: textInfos.TextInfo.TextWithFieldsT = []
 		reportFormattingOptions = (
 			"reportFontName",
 			"reportFontSize",
@@ -2406,7 +2645,7 @@ class BrowseModeDocumentTreeInterceptor(
 			"reportStyle",
 			"reportLinks",
 		)
-		formatConfig = dict()
+		formatConfig = dict()  # noqa: C408
 		for i in config.conf["documentFormatting"]:
 			formatConfig[i] = i in reportFormattingOptions
 
@@ -2434,7 +2673,7 @@ class BrowseModeDocumentTreeInterceptor(
 			elif isinstance(field, str):
 				result.append(field)
 			else:
-				raise RuntimeError("Unrecognized field in TextInfo.getTextWithFields()")
+				raise RuntimeError("Unrecognized field in TextInfo.getTextWithFields()")  # noqa: TRY004
 		return result
 
 	def _mergeIdenticalStyles(
@@ -2461,7 +2700,7 @@ class BrowseModeDocumentTreeInterceptor(
 		# Now merging adjacent strings
 		result = []
 		for k, g in itertools.groupby(sequence, key=type):
-			if k == str:  # noqa: E721
+			if k == str:
 				result.append("".join(g))
 			else:
 				result.extend(list(g))
@@ -2513,11 +2752,10 @@ class BrowseModeDocumentTreeInterceptor(
 						endInfo = paragraphInfo.moveToCodepointOffset(endIndex)
 						resultInfo.setEndPoint(endInfo, which="startToStart")
 					return resultInfo
-			else:
-				resultInfo.setEndPoint(
-					paragraphInfo,
-					which="endToEnd" if direction == documentBase._Movement.NEXT else "startToStart",
-				)
+			resultInfo.setEndPoint(
+				paragraphInfo,
+				which="endToEnd" if direction == documentBase._Movement.NEXT else "startToStart",
+			)
 		return resultInfo
 
 	def _moveToNextParagraph(
@@ -2546,7 +2784,7 @@ class BrowseModeDocumentTreeInterceptor(
 		paragraph.expand(textInfos.UNIT_PARAGRAPH)
 		if paragraph.isCollapsed:
 			return False
-		if (
+		if (  # noqa: SIM103
 			direction == documentBase._Movement.NEXT
 			and paragraph.compareEndPoints(oldParagraph, "startToStart") <= 0
 		):
@@ -2559,7 +2797,7 @@ class BrowseModeDocumentTreeInterceptor(
 		kind: str,
 		direction: documentBase._Movement = documentBase._Movement.NEXT,
 		pos: textInfos.TextInfo | None = None,
-	) -> Generator[TextInfoQuickNavItem, None, None]:
+	) -> Generator[TextInfoQuickNavItem]:
 		if direction not in [
 			documentBase._Movement.NEXT,
 			documentBase._Movement.PREVIOUS,
@@ -2569,7 +2807,7 @@ class BrowseModeDocumentTreeInterceptor(
 
 		initialTextInfo = pos.copy()
 		initialTextInfo.collapse()
-		if direction == documentBase._Movement.PREVIOUS:
+		if direction == documentBase._Movement.PREVIOUS:  # noqa: SIM102
 			# If going backwards, need to include character at the cursor.
 			if 0 == initialTextInfo.move(textInfos.UNIT_CHARACTER, 1, endPoint="end"):
 				return
@@ -2651,14 +2889,21 @@ class BrowseModeDocumentTreeInterceptor(
 			if not self._moveToNextParagraph(paragraph, direction):
 				return
 
-	__gestures = {
-		"kb:alt+upArrow": "collapseOrExpandControl",
-		"kb:alt+downArrow": "collapseOrExpandControl",
+	__gestures = {  # noqa: RUF012
 		"kb:tab": "tab",
 		"kb:shift+tab": "shiftTab",
 		"kb:shift+,": "moveToStartOfContainer",
 		"kb:,": "movePastEndOfContainer",
 	}
+
+	def _toggleScreenLayout(self) -> None:
+		"""Toggles whether the document is presented as it appears visually, or with interactive controls on their own lines.
+
+		Subclasses that support toggling this option should implement this method.
+
+		:raises NotImplementedError: If toggling this option is not supported by this document.
+		"""
+		raise NotImplementedError
 
 	@script(
 		description=_(
@@ -2667,17 +2912,33 @@ class BrowseModeDocumentTreeInterceptor(
 		),
 		gesture="kb:NVDA+v",
 	)
-	def script_toggleScreenLayout(self, gesture):
-		# Translators: The message reported for not supported toggling of screen layout
-		ui.message(_("Not supported in this document."))
+	def script_toggleScreenLayout(self, gesture: inputCore.InputGesture) -> None:
+		try:
+			self._toggleScreenLayout()
+		except NotImplementedError:
+			# Translators: The message reported for not supported toggling of screen layout
+			ui.message(_("Not supported in this document."))
 
 	def updateAppSelection(self):
 		"""Update the native selection in the application to match the browse mode selection in NVDA."""
 		raise NotImplementedError
 
 	def clearAppSelection(self):
-		"""Clear the native selection in the application."""
+		"""Clear the native selection in the application, leaving it without a caret."""
 		raise NotImplementedError
+
+	def collapseAppSelection(self):
+		"""Collapse the native selection in the application to a caret at the browse mode cursor."""
+		raise NotImplementedError
+
+	def _set_disableAutoPassThrough(self, state: bool):
+		syncAppSelection = state and self.passThrough and self._nativeAppSelectionMode
+		super()._set_disableAutoPassThrough(state)
+		if syncAppSelection:
+			try:
+				self.updateAppSelection()
+			except (NotImplementedError, COMError):
+				log.debugWarning("Synchronising the native selection with focus mode failed", exc_info=True)
 
 	@script(
 		gesture="kb:NVDA+shift+f10",
@@ -2696,8 +2957,11 @@ class BrowseModeDocumentTreeInterceptor(
 		nativeAppSelectionModeOn = not self._nativeAppSelectionMode
 		if nativeAppSelectionModeOn:
 			try:
+				# We need to clear the app selection before updating it when turning it on,
+				# as the app must be able to support clearing / setting empty selections.
+				self.clearAppSelection()
 				self.updateAppSelection()
-			except NotImplementedError:
+			except (NotImplementedError, COMError):
 				log.debugWarning("updateAppSelection failed", exc_info=True)
 				# Translators: the message when native selection mode is not available in this browse mode document.
 				ui.message(_("Native selection mode unsupported in this document"))
@@ -2707,9 +2971,9 @@ class BrowseModeDocumentTreeInterceptor(
 			ui.message(_("Native app selection mode enabled"))
 		else:
 			try:
-				self.clearAppSelection()
-			except NotImplementedError:
-				log.debugWarning("clearAppSelection failed", exc_info=True)
+				self.collapseAppSelection()
+			except (NotImplementedError, COMError):
+				log.debugWarning("collapseAppSelection failed", exc_info=True)
 			self._nativeAppSelectionMode = False
 			# Translators: reported when native selection mode is toggled off.
 			ui.message(_("Native app selection mode disabled"))
@@ -2719,11 +2983,11 @@ class BrowseModeDocumentTreeInterceptor(
 	def _iterSimilarParagraph(
 		self,
 		kind: str,
-		paragraphFunction: Callable[[textInfos.TextInfo], Optional[Any]],
-		desiredValue: Optional[Any],
+		paragraphFunction: Callable[[textInfos.TextInfo], Any],
+		desiredValue: Any,
 		direction: _Movement,
 		pos: textInfos.TextInfo,
-	) -> Generator[TextInfoQuickNavItem, None, None]:
+	) -> Generator[TextInfoQuickNavItem]:
 		if direction not in [_Movement.NEXT, _Movement.PREVIOUS]:
 			raise RuntimeError
 		info = pos.copy()

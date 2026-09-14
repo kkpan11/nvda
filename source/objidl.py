@@ -1,20 +1,21 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2010-2021 NV Access Limited, Leonard de Ruijter, Joseph Lee
+# Copyright (C) 2010-2025 NV Access Limited, Leonard de Ruijter, Joseph Lee
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
-from ctypes import c_int, c_longlong, c_ubyte, c_ulong, c_ulonglong, c_wchar_p, POINTER, Structure, windll
+from ctypes import c_int, c_longlong, c_ubyte, c_ulong, c_ulonglong, c_wchar_p, POINTER, Structure  # noqa: I001
 from ctypes.wintypes import HWND, BOOL
 from comtypes import HRESULT, GUID, COMMETHOD, IUnknown, tagBIND_OPTS2
 from comtypes.persist import IPersist
-import winKernel
+import winBindings.ole32
+import winBindings.kernel32
 
 WSTRING = c_wchar_p
 
 
 class IOleWindow(IUnknown):
 	_iid_ = GUID("{00000114-0000-0000-C000-000000000046}")
-	_methods_ = [
+	_methods_ = [  # noqa: RUF012
 		COMMETHOD(
 			[],
 			HRESULT,
@@ -47,9 +48,9 @@ class tagSTATSTG(Structure):
 		("pwcsName", WSTRING),
 		("type", c_ulong),
 		("cbSize", _ULARGE_INTEGER),
-		("mtime", winKernel.FILETIME),
-		("ctime", winKernel.FILETIME),
-		("atime", winKernel.FILETIME),
+		("mtime", winBindings.kernel32.FILETIME),
+		("ctime", winBindings.kernel32.FILETIME),
+		("atime", winBindings.kernel32.FILETIME),
 		("grfMode", c_ulong),
 		("grfLocksSupported", c_ulong),
 		("clsid", GUID),
@@ -60,8 +61,8 @@ class tagSTATSTG(Structure):
 
 class ISequentialStream(IUnknown):
 	_iid_ = GUID("{0C733A30-2A1C-11CE-ADE5-00AA0044773D}")
-	_idlflags_ = []
-	_methods_ = [
+	_idlflags_ = []  # noqa: RUF012
+	_methods_ = [  # noqa: RUF012
 		COMMETHOD(
 			[],
 			HRESULT,
@@ -83,7 +84,7 @@ class ISequentialStream(IUnknown):
 
 class IStream(ISequentialStream):
 	_iid_ = GUID("{0000000C-0000-0000-C000-000000000046}")
-	_idlflags_ = []
+	_idlflags_ = []  # noqa: RUF012
 
 
 IStream._methods_ = [
@@ -151,8 +152,8 @@ IStream._methods_ = [
 
 class IPersistStream(IPersist):
 	_iid_ = GUID("{00000109-0000-0000-C000-000000000046}")
-	_idlflags_ = []
-	_methods_ = [
+	_idlflags_ = []  # noqa: RUF012
+	_methods_ = [  # noqa: RUF012
 		COMMETHOD([], HRESULT, "IsDirty"),
 		COMMETHOD(
 			[],
@@ -178,7 +179,7 @@ class IPersistStream(IPersist):
 
 class IRunningObjectTable(IUnknown):
 	_iid_ = GUID("{00000010-0000-0000-C000-000000000046}")
-	_idlflags_ = []
+	_idlflags_ = []  # noqa: RUF012
 
 	def __iter__(self):
 		return self.EnumRunning()
@@ -186,7 +187,7 @@ class IRunningObjectTable(IUnknown):
 
 class IEnumString(IUnknown):
 	_iid_ = GUID("{00000101-0000-0000-C000-000000000046}")
-	_idlflags_ = []
+	_idlflags_ = []  # noqa: RUF012
 
 
 IEnumString._methods_ = [
@@ -216,8 +217,8 @@ IEnumString._methods_ = [
 
 class IBindCtx(IUnknown):
 	_iid_ = GUID("{0000000E-0000-0000-C000-000000000046}")
-	_idlflags_ = []
-	_methods_ = [
+	_idlflags_ = []  # noqa: RUF012
+	_methods_ = [  # noqa: RUF012
 		COMMETHOD(
 			[],
 			HRESULT,
@@ -280,19 +281,19 @@ class IBindCtx(IUnknown):
 
 class IMoniker(IPersistStream):
 	_iid_ = GUID("{0000000F-0000-0000-C000-000000000046}")
-	_idlflags_ = []
+	_idlflags_ = []  # noqa: RUF012
 
 	def GetDisplayName(self, pbc, pmkToLeft):
 		displayName = WSTRING()
 		self.__com_GetDisplayName(pbc, pmkToLeft, displayName)
 		ret = displayName.value
-		windll.ole32.CoTaskMemFree(displayName)
+		winBindings.ole32.CoTaskMemFree(displayName)
 		return ret
 
 
 class IEnumMoniker(IUnknown):
 	_iid_ = GUID("{00000102-0000-0000-C000-000000000046}")
-	_idlflags_ = []
+	_idlflags_ = []  # noqa: RUF012
 
 	def Next(self, celt):
 		fetched = c_ulong()
@@ -407,7 +408,7 @@ IMoniker._methods_ = [
 		"GetTimeOfLastChange",
 		(["in"], POINTER(IBindCtx), "pbc"),
 		(["in"], POINTER(IMoniker), "pmkToLeft"),
-		(["out"], POINTER(winKernel.FILETIME), "pfiletime"),
+		(["out"], POINTER(winBindings.kernel32.FILETIME), "pfiletime"),
 	),
 	COMMETHOD(
 		[],
@@ -489,14 +490,14 @@ IRunningObjectTable._methods_ = [
 		HRESULT,
 		"NoteChangeTime",
 		(["in"], c_ulong, "dwRegister"),
-		(["in"], POINTER(winKernel.FILETIME), "pfiletime"),
+		(["in"], POINTER(winBindings.kernel32.FILETIME), "pfiletime"),
 	),
 	COMMETHOD(
 		[],
 		HRESULT,
 		"GetTimeOfLastChange",
 		(["in"], POINTER(IMoniker), "pmkObjectName"),
-		(["out"], POINTER(winKernel.FILETIME), "pfiletime"),
+		(["out"], POINTER(winBindings.kernel32.FILETIME), "pfiletime"),
 	),
 	COMMETHOD(
 		[],

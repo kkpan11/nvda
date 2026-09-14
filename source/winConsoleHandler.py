@@ -1,11 +1,13 @@
-# winConsoleHandler.py
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2009-2018 NV Access Limited, Babbage B.V.
+# Copyright (C) 2009-2026 NV Access Limited, Babbage B.V.
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
+from ctypes.wintypes import SMALL_RECT  # noqa: I001
 import gui
 import winUser
+import winBindings.kernel32
+import winBindings.user32
 import winKernel
 import wincon
 from colors import RGB
@@ -14,10 +16,6 @@ from logHandler import log
 import textInfos
 import config
 import locationHelper
-from typing import (
-	Optional,
-	Dict,
-)
 
 """
 Handler for NVDA's legacy Windows Console support,
@@ -54,9 +52,9 @@ CONSOLE_COLORS_TO_RGB = (  # http://en.wikipedia.org/wiki/Color_Graphics_Adapter
 COMMON_LVB_UNDERSCORE = 0x8000
 
 
-@wincon.PHANDLER_ROUTINE
+@winBindings.kernel32.PHANDLER_ROUTINE
 def _consoleCtrlHandler(event):
-	if event in (wincon.CTRL_C_EVENT, wincon.CTRL_BREAK_EVENT):
+	if event in (wincon.CTRL_C_EVENT, wincon.CTRL_BREAK_EVENT):  # noqa: SIM103
 		return True
 	return False
 
@@ -64,17 +62,17 @@ def _consoleCtrlHandler(event):
 def connectConsole(obj):
 	global consoleObject, consoleOutputHandle, checkDeadTimer
 	# Get the process ID of the console this NVDAObject is fore
-	processID, threadID = winUser.getWindowThreadProcessID(obj.windowHandle)
+	processID, threadID = winUser.getWindowThreadProcessID(obj.windowHandle)  # noqa: RUF059
 	# Attach NVDA to this console so we can access its text etc
 	try:
 		wincon.AttachConsole(processID)
-	except WindowsError as e:
-		log.debugWarning("Could not attach console: %r" % e)
+	except OSError as e:
+		log.debugWarning("Could not attach console: %r" % e)  # noqa: UP031
 		return False
 	wincon.SetConsoleCtrlHandler(_consoleCtrlHandler, True)
 	consoleOutputHandle = winKernel.CreateFile(
 		"CONOUT$",
-		winKernel.GENERIC_READ | winKernel.GENERIC_WRITE,
+		winBindings.kernel32.GENERIC.READ | winBindings.kernel32.GENERIC.WRITE,
 		winKernel.FILE_SHARE_READ | winKernel.FILE_SHARE_WRITE,
 		None,
 		winKernel.OPEN_EXISTING,
@@ -91,7 +89,7 @@ def connectConsole(obj):
 	):
 		handle = winUser.setWinEventHook(eventID, eventID, 0, consoleWinEventHook, 0, 0, 0)
 		if not handle:
-			raise OSError("could not register eventID %s" % eventID)
+			raise OSError("could not register eventID %s" % eventID)  # noqa: UP031
 		consoleWinEventHookHandles.append(handle)
 	consoleObject = obj
 	checkDeadTimer = gui.NonReEntrantTimer(_checkDead)
@@ -109,19 +107,19 @@ def disconnectConsole():
 	# Unregister any win events we are using
 	for handle in consoleWinEventHookHandles:
 		winUser.unhookWinEvent(handle)
-	consoleEventHookHandles = []  # noqa: F841
+	consoleWinEventHookHandles = []
 	consoleObject.stopMonitoring()
 	winKernel.closeHandle(consoleOutputHandle)
 	consoleOutputHandle = None
 	consoleObject = None
 	try:
 		wincon.SetConsoleCtrlHandler(_consoleCtrlHandler, False)
-	except WindowsError:
+	except OSError:
 		pass
 	# Try freeing NVDA from this console
 	try:
 		wincon.FreeConsole()
-	except WindowsError:
+	except OSError:
 		pass
 	return True
 
@@ -153,8 +151,16 @@ def getConsoleVisibleLines():
 	return newLines
 
 
-@winUser.WINEVENTPROC
-def consoleWinEventHook(handle, eventID, window, objectID, childID, threadID, timestamp):
+@winBindings.user32.WINEVENTPROC
+def consoleWinEventHook(
+	handle: int | None,
+	eventID: int,
+	window: int | None,
+	objectID: int,
+	childID: int,
+	threadID: int,
+	timestamp: int,
+) -> None:
 	from NVDAObjects.behaviors import KeyboardHandlerBasedTypedCharSupport
 
 	# We don't want to do anything with the event if the event is not for the window this console is in
@@ -254,7 +260,7 @@ class WinConsoleTextInfo(textInfos.offsets.OffsetsTextInfo):
 			start = end = self._getCaretOffset()
 		return start, end
 
-	def getTextWithFields(self, formatConfig: Optional[Dict] = None) -> textInfos.TextInfo.TextWithFieldsT:
+	def getTextWithFields(self, formatConfig: dict | None = None) -> textInfos.TextInfo.TextWithFieldsT:
 		commands = []
 		if self.isCollapsed:
 			return commands
@@ -262,7 +268,7 @@ class WinConsoleTextInfo(textInfos.offsets.OffsetsTextInfo):
 			formatConfig = config.conf["documentFormatting"]
 		left, top = self._consoleCoordFromOffset(self._startOffset)
 		right, bottom = self._consoleCoordFromOffset(self._endOffset - 1)
-		rect = wincon.SMALL_RECT(left, top, right, bottom)
+		rect = SMALL_RECT(left, top, right, bottom)
 		if bottom - top > 0:  # offsets span multiple lines
 			rect.Left = 0
 			rect.Right = self.consoleScreenBufferInfo.dwSize.x - 1
@@ -277,12 +283,12 @@ class WinConsoleTextInfo(textInfos.offsets.OffsetsTextInfo):
 		boundEnd = self._startOffset
 		for i, c in enumerate(buf):
 			if self._startOffset + i == boundEnd:
-				field, (boundStart, boundEnd) = self._getFormatFieldAndOffsets(boundEnd, formatConfig)
+				field, (boundStart, boundEnd) = self._getFormatFieldAndOffsets(boundEnd, formatConfig)  # noqa: RUF059
 				if lastText:
 					commands.append("".join(lastText))
 					lastText = []
 				commands.append(textInfos.FieldCommand("formatChange", field))
-			if not c.Attributes == lastAttr:
+			if not c.Attributes == lastAttr:  # noqa: SIM201
 				formatField = textInfos.FormatField()
 				if formatConfig["reportColor"]:
 					formatField["color"] = CONSOLE_COLORS_TO_RGB[c.Attributes & 0x0F]
@@ -314,7 +320,7 @@ class WinConsoleTextInfo(textInfos.offsets.OffsetsTextInfo):
 
 	def _getLineNumFromOffset(self, offset):
 		consoleScreenBufferInfo = self.consoleScreenBufferInfo
-		x, y = self._consoleCoordFromOffset(offset)
+		x, y = self._consoleCoordFromOffset(offset)  # noqa: RUF059
 		return y - consoleScreenBufferInfo.srWindow.Top
 
 	def _getStoryLength(self):

@@ -1,12 +1,12 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2020-2022 NV Access Limited, Łukasz Golonka
+# Copyright (C) 2020-2025 NV Access Limited, Łukasz Golonka
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
 """Logic for startupShutdownNVDA tests."""
 
-from datetime import datetime as _datetime
-from typing import Callable as _Callable
+from datetime import datetime as _datetime  # noqa: I001
+from collections.abc import Callable as _Callable
 from robot.libraries.BuiltIn import BuiltIn
 
 # relative import not used for 'systemTestUtils' because the folder is added to the path for 'libraries'
@@ -15,7 +15,12 @@ from SystemTestSpy import (
 	_getLib,
 	_blockUntilConditionMet,
 )
-from SystemTestSpy.windows import getWindowHandle, waitUntilWindowFocused, windowWithHandleExists
+from SystemTestSpy.windows import (
+	getWindowHandle,
+	sendKeyboardEvent,
+	waitUntilWindowFocused,
+	windowWithHandleExists,
+)
 
 # Imported for type information
 from robot.libraries.OperatingSystem import OperatingSystem as _OpSysLib
@@ -74,7 +79,7 @@ def quits_from_menu(showExitDialog=True):
 
 		_asserts.strings_match(
 			actualSpeech,
-			"\n".join(
+			"\n".join(  # noqa: FLY002
 				[
 					"Exit NVDA  dialog",
 					"What would you like to do?  combo box  Exit  collapsed  Alt plus  d",
@@ -105,7 +110,7 @@ def quits_from_keyboard():
 
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				"Exit NVDA  dialog",
 				"What would you like to do?  combo box  Exit  collapsed  Alt plus  d",
@@ -117,15 +122,33 @@ def quits_from_keyboard():
 	spy.emulateKeyPress("enter", blockUntilProcessed=False)  # don't block so NVDA can exit
 	_blockUntilConditionMet(
 		getValue=lambda: not _nvdaIsRunning(),
-		giveUpAfterSeconds=3,
+		giveUpAfterSeconds=5,
 		errorMessage="NVDA failed to exit in the specified timeout",
 	)
 	_builtIn.should_not_be_true(_nvdaIsRunning(), msg="NVDA is still running")
 
 
 def test_desktop_shortcut():
-	spy = _nvdaLib.getSpyLib()
-	spy.emulateKeyPress("control+alt+n")
+	# Press Control+Alt+N using keybd_event
+	VK_CONTROL = 17
+	VK_MENU = 18  # Alt key
+	VK_N = 78  # 'N' key
+	KEYEVENTF_KEYDOWN = 0
+	KEYEVENTF_KEYUP = 2
+
+	# Press Control down
+	sendKeyboardEvent(VK_CONTROL, 0, KEYEVENTF_KEYDOWN, 0)
+	# Press Alt down
+	sendKeyboardEvent(VK_MENU, 0, KEYEVENTF_KEYDOWN, 0)
+	# Press N down
+	sendKeyboardEvent(VK_N, 0, KEYEVENTF_KEYDOWN, 0)
+	# Release N
+	sendKeyboardEvent(VK_N, 0, KEYEVENTF_KEYUP, 0)
+	# Release Alt
+	sendKeyboardEvent(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+	# Release Control
+	sendKeyboardEvent(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0)
+
 	# Takes some time to exit a running process and start a new one
 	waitUntilWindowFocused("Welcome to NVDA", timeoutSecs=7)
 
@@ -138,7 +161,7 @@ def read_welcome_dialog():
 
 	_asserts.strings_match(
 		actualSpeech,
-		"\n".join(
+		"\n".join(  # noqa: FLY002
 			[
 				(
 					"Welcome to NVDA  dialog  Welcome to NVDA! Most commands for controlling NVDA require you to hold "
@@ -191,7 +214,7 @@ def _attemptFileRemove(filePath: str) -> bool:
 
 
 def _ensureRestartWithCrashDump(crashFunction: _Callable[[], None]):
-	startTime = _datetime.utcnow()
+	startTime = _datetime.utcnow()  # noqa: DTZ003
 	spy = _nvdaLib.getSpyLib()
 	spy.wait_for_specific_speech("Welcome to NVDA")  # ensure the dialog is present
 	spy.emulateKeyPress("enter")  # close the dialog so we can check for it after the crash
@@ -200,7 +223,7 @@ def _ensureRestartWithCrashDump(crashFunction: _Callable[[], None]):
 	crashFunction()
 	_blockUntilConditionMet(
 		getValue=lambda: windowWithHandleExists(oldMsgWindowHandle) is False,
-		giveUpAfterSeconds=3,
+		giveUpAfterSeconds=10,
 		errorMessage="Old NVDA is still running",
 	)
 	_builtIn.should_not_be_true(

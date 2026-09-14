@@ -1,10 +1,10 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2006-2023 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Bill Dengler,
-# Julien Cochuyt, Leonard de Ruijter
+# Copyright (C) 2006-2025 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Bill Dengler,
+# Julien Cochuyt, Leonard de Ruijter, Cyrille Bougot
 
-from .speech import (
+from .speech import (  # noqa: I001
 	_extendSpeechSequence_addMathForTextInfo,
 	_getSpellingSpeechAddCharMode,
 	_getSpellingCharAddCapNotification,
@@ -14,6 +14,7 @@ from .speech import (
 	_getSpeakMessageSpeech,
 	_manager,
 	_objectSpeech_calculateAllowedProps,
+	_setLastSpeechString,
 	_suppressSpeakTypedCharacters,
 	BLANK_CHUNK_CHARS,
 	cancelSpeech,
@@ -35,8 +36,9 @@ from .speech import (
 	getTextInfoSpeech,
 	IDT_BASE_FREQUENCY,
 	IDT_MAX_SPACES,
-	IDT_TONE_DURATION,
+	getIndentToneDuration,
 	isBlank,
+	isSpeaking,
 	LANGS_WITH_CONJUNCT_CHARS,
 	pauseSpeech,
 	processText,
@@ -63,7 +65,8 @@ from .speech import (
 	spellTextInfo,
 	splitTextIndentation,
 )
-from .extensions import speechCanceled
+from .extensions import speechCanceled, post_speechPaused, pre_speechQueued, filter_speechSequence, pre_speech
+from .languageHandling import getSpeechSequenceWithLangs
 from .priorities import Spri
 
 from .types import (
@@ -74,7 +77,7 @@ from .types import (
 	_flattenNestedSequences,
 )
 
-__all__ = [
+__all__ = [  # noqa: RUF022
 	# from .priorities
 	"Spri",
 	# from .types
@@ -114,8 +117,9 @@ __all__ = [
 	"getTextInfoSpeech",
 	"IDT_BASE_FREQUENCY",
 	"IDT_MAX_SPACES",
-	"IDT_TONE_DURATION",
+	"getIndentToneDuration",
 	"isBlank",
+	"isSpeaking",
 	"LANGS_WITH_CONJUNCT_CHARS",
 	"pauseSpeech",
 	"processText",
@@ -142,9 +146,11 @@ __all__ = [
 	"spellTextInfo",
 	"splitTextIndentation",
 	"speechCanceled",
+	"post_speechPaused",
+	"pre_speechQueued",
 ]
 
-import synthDriverHandler
+import synthDriverHandler  # noqa: I001
 import config
 from .speech import initialize as speechInitialize
 from .sayAll import initialize as sayAllInitialize
@@ -163,7 +169,11 @@ def initialize():
 		getTextInfoSpeech,
 		SpeakTextInfoState,
 	)
+	filter_speechSequence.register(getSpeechSequenceWithLangs)
+	pre_speech.register(_setLastSpeechString)
 
 
 def terminate():
 	synthDriverHandler.setSynth(None)
+	filter_speechSequence.unregister(getSpeechSequenceWithLangs)
+	pre_speech.unregister(_setLastSpeechString)

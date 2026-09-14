@@ -1,13 +1,12 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2017-2023 NV Access Limited, Ethan Holliger, Dinesh Kaushal, Leonard de Ruijter,
+# Copyright (C) 2017-2025 NV Access Limited, Ethan Holliger, Dinesh Kaushal, Leonard de Ruijter,
 # Joseph Lee, Julien Cochuyt, Łukasz Golonka, Cyrille Bougot
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
 """Check a translation template (pot) for strings without translator comments."""
 
-import sys
-from typing import Set
+import sys  # noqa: I001
 
 
 # Existing messages that we know don't have translator comments yet.
@@ -47,8 +46,6 @@ EXPECTED_MESSAGES_WITHOUT_COMMENTS = {
 	"column break",
 	"background pattern {pattern}",
 	"NVDA Speech Viewer",
-	"text mode",
-	"object mode",
 	"NonVisual Desktop Access",
 	"A free and open source screen reader for Microsoft Windows",
 	"Copyright (C) {years} NVDA Contributors",
@@ -91,7 +88,7 @@ def checkPot(fileName):
 	errors = 0
 	expectedErrors = 0
 	unexpectedSuccesses = 0
-	foundMessagesWithOutComments: Set[str] = set()
+	foundMessagesWithOutComments: set[str] = set()
 	with open(fileName, "rt", encoding="utf-8") as pot:
 		passedHeader = False
 		for line in pot:
@@ -136,8 +133,8 @@ def checkPot(fileName):
 					# 	"keys are passed to the application"
 					msgid = ""
 					for line in pot:
-						if line.startswith("msgstr "):
-							# This begins the translated message, so msgid has ended.
+						if line.startswith("msgstr ") or line.startswith("msgid_plural"):  # noqa: PIE810
+							# This begins the translated or plural message, so msgid has ended.
 							break
 						msgid += getStringFromLine(line)
 				else:
@@ -146,7 +143,7 @@ def checkPot(fileName):
 					msgid = getStringFromLine(line)
 				if context:
 					# The context must be considered as part of the message.
-					message = "[{context}] {msgid}".format(context=context, msgid=msgid)
+					message = f"[{context}] {msgid}"
 				else:
 					message = msgid
 				isExpectedError = message in EXPECTED_MESSAGES_WITHOUT_COMMENTS
@@ -167,11 +164,12 @@ def checkPot(fileName):
 				else:
 					continue
 				print(
-					"{error}\n" "Source lines: {lines}\n" "Message: {message}\n".format(
+					"{error}\nSource lines: {lines}\nMessage: {message}\n".format(
 						error=error,
 						lines=" ".join(sourceLines),
 						message=message,
 					),
+					file=sys.stderr,
 				)
 				continue
 	removedTranslatableMessages = EXPECTED_MESSAGES_WITHOUT_COMMENTS - foundMessagesWithOutComments
@@ -179,11 +177,13 @@ def checkPot(fileName):
 		print(
 			"The following messages are no longer present in the source code "
 			"and should be removed from `EXPECTED_MESSAGES_WITHOUT_COMMENTS`:",
+			file=sys.stderr,
 		)
-		print("\n".join(removedTranslatableMessages))
+		print("\n".join(removedTranslatableMessages), file=sys.stderr)
 	print(
 		f"{errors} errors, {unexpectedSuccesses} unexpected successes, {expectedErrors} expected errors, "
 		f"{len(removedTranslatableMessages)} messages marked as expected errors not present in the source code",
+		file=sys.stderr,
 	)
 	return errors + unexpectedSuccesses + len(removedTranslatableMessages)
 
@@ -201,6 +201,6 @@ def getStringFromLine(line):
 
 
 if __name__ == "__main__":
-	# Support command line usage for quick testing.
 	fileName = sys.argv[1]
-	print(checkPot(fileName))
+	results = checkPot(fileName)
+	sys.exit(results)

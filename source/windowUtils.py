@@ -1,5 +1,5 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2013-2023 NV Access Limited, Bill Dengler
+# Copyright (C) 2013-2026 NV Access Limited, Bill Dengler, Christopher Proß
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
@@ -9,14 +9,27 @@ Utilities for working with windows (HWNDs).
 When working on this file, consider moving to winAPI.
 """
 
+import contextlib  # noqa: I001
 import ctypes
+import ctypes.wintypes
 import weakref
+import winBindings.kernel32
+import winBindings.user32
+import winBindings.gdi32
 import winUser
-from winUser import WNDCLASSEXW, WNDPROC
+from winBindings.user32 import WNDCLASSEXW, WNDPROC
 from logHandler import log
 from abc import abstractmethod
 from baseObject import AutoPropertyObject
-from typing import Optional
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
+from winBindings import user32
+
+if TYPE_CHECKING:
+	# locationHelper imports this module, so importing it at runtime would create an import cycle
+	# and would pull wx into every importer of this low level module.
+	import locationHelper
+
 
 WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.wintypes.BOOL, ctypes.wintypes.HWND, ctypes.wintypes.LPARAM)
 
@@ -49,26 +62,11 @@ def findDescendantWindow(parent, visible=None, controlID=None, className=None):
 			return False
 		return True
 
-	ctypes.windll.user32.EnumChildWindows(parent, callback, 0)
+	user32.EnumChildWindows(parent, callback, 0)
 	try:
 		return result[0]
 	except IndexError:
 		raise LookupError("No matching descendant window found")
-
-
-try:
-	# Windows >= 8.1
-	_logicalToPhysicalPoint = ctypes.windll.user32.LogicalToPhysicalPointForPerMonitorDPI
-	_physicalToLogicalPoint = ctypes.windll.user32.PhysicalToLogicalPointForPerMonitorDPI
-except AttributeError:
-	try:
-		# Windows Vista..Windows 8
-		_logicalToPhysicalPoint = ctypes.windll.user32.LogicalToPhysicalPoint
-		_physicalToLogicalPoint = ctypes.windll.user32.PhysicalToLogicalPoint
-	except AttributeError:
-		# Windows <= XP
-		_logicalToPhysicalPoint = None
-		_physicalToLogicalPoint = None
 
 
 def logicalToPhysicalPoint(window, x, y):
@@ -82,10 +80,8 @@ def logicalToPhysicalPoint(window, x, y):
 	@return: The physical x and y coordinates.
 	@rtype: tuple of (int, int)
 	"""
-	if not _logicalToPhysicalPoint:
-		return x, y
 	point = ctypes.wintypes.POINT(x, y)
-	_logicalToPhysicalPoint(window, ctypes.byref(point))
+	user32.LogicalToPhysicalPointForPerMonitorDPI(window, ctypes.byref(point))
 	return point.x, point.y
 
 
@@ -100,11 +96,105 @@ def physicalToLogicalPoint(window, x, y):
 	@return: The logical x and y coordinates.
 	@rtype: tuple of (int, int)
 	"""
-	if not _physicalToLogicalPoint:
-		return x, y
 	point = ctypes.wintypes.POINT(x, y)
-	_physicalToLogicalPoint(window, ctypes.byref(point))
+	user32.PhysicalToLogicalPointForPerMonitorDPI(window, ctypes.byref(point))
 	return point.x, point.y
+
+
+DPI_AWARENESS_CONTEXT_UNAWARE = -1
+"""The predefined DPI_AWARENESS_CONTEXT handle value for DPI unaware behavior."""
+
+
+@contextlib.contextmanager
+def _threadDpiAwarenessContext(dpiContext: int) -> Iterator[None]:
+	"""Temporarily switch the current thread's DPI awareness context.
+
+	:param dpiContext: The DPI_AWARENESS_CONTEXT handle value to apply.
+	:raise OSError: If the context cannot be applied.
+	"""
+	previousContext = user32.SetThreadDpiAwarenessContext(dpiContext)
+	if not previousContext:
+		raise OSError(f"Could not set the thread DPI awareness context {dpiContext}")
+	try:
+		yield
+	finally:
+		user32.SetThreadDpiAwarenessContext(previousContext)
+
+
+@contextlib.contextmanager
+def threadDpiAwarenessContextOfWindow(window: int) -> Iterator[None]:
+	"""Temporarily switch the current thread's DPI awareness context to that of the given window.
+
+	Coordinate queries made inside this context return values
+	as the given window sees them,
+	which for a DPI virtualized window is its virtualized coordinate space.
+
+	:param window: The window handle.
+	:raise OSError: If the window's DPI awareness context cannot be applied,
+		for example because the window handle is no longer valid.
+	"""
+	with _threadDpiAwarenessContext(user32.GetWindowDpiAwarenessContext(window)):
+		yield
+
+
+def _fetchWindowRect(window: int) -> "locationHelper.RectLTRB":
+	"""Fetch a window's bounding rectangle in the current thread's DPI awareness context.
+
+	:param window: The window handle.
+	:return: The window rectangle.
+	:raise OSError: If the rectangle cannot be fetched.
+	"""
+	import locationHelper
+
+	rect = ctypes.wintypes.RECT()
+	if not user32.GetWindowRect(window, ctypes.byref(rect)):
+		raise ctypes.WinError()
+	return locationHelper.RectLTRB.fromCompatibleType(rect)
+
+
+def getPhysicalWindowRect(window: int) -> "locationHelper.RectLTRB":
+	"""Fetch a window's bounding rectangle in physical screen coordinates.
+
+	NVDA is per monitor DPI aware, so its own view of screen coordinates is physical.
+
+	:param window: The window handle.
+	:return: The window rectangle in physical screen coordinates.
+	:raise OSError: If the rectangle cannot be fetched.
+	"""
+	return _fetchWindowRect(window)
+
+
+def getWindowRectInWindowDpiContext(window: int) -> "locationHelper.RectLTRB":
+	"""Fetch a window's bounding rectangle as seen from the window's own DPI awareness context.
+
+	For a window whose coordinates are DPI virtualized by the system,
+	this returns the virtualized rectangle,
+	while a plain ``GetWindowRect`` call from NVDA returns the physical rectangle.
+	Comparing and combining both rectangles allows converting between the two coordinate spaces
+	without relying on ``PhysicalToLogicalPointForPerMonitorDPI``,
+	which fails for points outside the physical window rectangle.
+
+	:param window: The window handle.
+	:return: The window rectangle in the coordinate space of the window's own DPI awareness context.
+	:raise OSError: If the DPI awareness context cannot be applied or the rectangle cannot be fetched.
+	"""
+	with threadDpiAwarenessContextOfWindow(window):
+		return _fetchWindowRect(window)
+
+
+def getWindowRectInUnawareDpiContext(window: int) -> "locationHelper.RectLTRB":
+	"""Fetch a window's bounding rectangle as seen by a DPI unaware process.
+
+	This is the 96 DPI based view the system presents to DPI unaware callers.
+	It applies to any window, including DPI aware ones,
+	and anchors conversions from 96 DPI based coordinate spaces to physical coordinates.
+
+	:param window: The window handle.
+	:return: The window rectangle in the 96 DPI based coordinate space.
+	:raise OSError: If the DPI awareness context cannot be applied or the rectangle cannot be fetched.
+	"""
+	with _threadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE):
+		return _fetchWindowRect(window)
 
 
 DEFAULT_DPI_LEVEL = 96
@@ -119,13 +209,12 @@ def getWindowScalingFactor(window: int) -> int:
 	percentage in the windows display settings. 100% is typically 96 DPI, 150% is typically 144 DPI.
 	@param window: a native Windows window handle (hWnd)
 	@returns the logical scaling factor. EG. 1.0 if the window DPI level is 96, 1.5 if the window DPI level is 144"""
-	user32 = ctypes.windll.user32
 	try:
 		winDpi: int = user32.GetDpiForWindow(window)
 	except:  # noqa: E722
 		log.debug("GetDpiForWindow failed, using GetDeviceCaps instead")
 		dc = user32.GetDC(window)
-		winDpi: int = ctypes.windll.gdi32.GetDeviceCaps(dc, LOGPIXELSX)
+		winDpi: int = winBindings.gdi32.GetDeviceCaps(dc, LOGPIXELSX)
 		ret = user32.ReleaseDC(window, dc)
 		if ret != 1:
 			log.error("Unable to release the device context.")
@@ -136,15 +225,15 @@ def getWindowScalingFactor(window: int) -> int:
 	if winDpi <= 0:
 		log.debugWarning(
 			"Failed to get the DPI for the window, assuming a "
-			"DPI of {} and using a scaling of 1. The hWnd value "
-			"used was: {}".format(DEFAULT_DPI_LEVEL, window),
+			f"DPI of {DEFAULT_DPI_LEVEL} and using a scaling of 1. The hWnd value "
+			f"used was: {window}",
 		)
 		return 1
 
 	return round(winDpi / DEFAULT_DPI_LEVEL)
 
 
-appInstance = ctypes.windll.kernel32.GetModuleHandleW(None)
+appInstance = winBindings.kernel32.GetModuleHandle(None)
 
 
 class CustomWindow(AutoPropertyObject):
@@ -155,7 +244,7 @@ class CustomWindow(AutoPropertyObject):
 	but it can be explicitly destroyed using L{destroy}.
 	"""
 
-	handle: Optional[int] = None
+	handle: int | None = None
 
 	@classmethod
 	def __new__(cls, *args, **kwargs):
@@ -188,10 +277,10 @@ class CustomWindow(AutoPropertyObject):
 
 	def __init__(
 		self,
-		windowName: Optional[str] = None,
+		windowName: str | None = None,
 		windowStyle: int = 0,
 		extendedWindowStyle: int = 0,
-		parent: Optional[int] = None,
+		parent: int | None = None,
 	):
 		"""Constructor.
 		@param windowName: The name of the window.
@@ -212,12 +301,13 @@ class CustomWindow(AutoPropertyObject):
 			raise TypeError("extendedWindowStyle must be an integer")
 		if parent and not isinstance(parent, int):
 			raise TypeError("parent must be an integer")
-		res = self._classAtom = ctypes.windll.user32.RegisterClassExW(ctypes.byref(self._wClass))
+		res = self._classAtom = winBindings.user32.RegisterClassEx(ctypes.byref(self._wClass))
 		if res == 0:
 			raise ctypes.WinError()
-		res = ctypes.windll.user32.CreateWindowExW(
+		res = winBindings.user32.CreateWindowEx(
 			extendedWindowStyle,
-			self._classAtom,
+			# The class atom should be stored as the low word of the class name string pointer.
+			ctypes.cast(ctypes.c_void_p(self._classAtom), ctypes.wintypes.LPCWSTR),
 			windowName or self.className,
 			windowStyle,
 			0,
@@ -240,13 +330,17 @@ class CustomWindow(AutoPropertyObject):
 		This will be called automatically when this instance is deleted,
 		but you may wish to call it earlier.
 		"""
-		if not ctypes.windll.user32.DestroyWindow(self.handle):
+		if not user32.DestroyWindow(self.handle):
 			log.error(
 				f"Error destroying window for {self.__class__.__qualname__}",
 				exc_info=ctypes.WinError(),
 			)
 		self.handle = None
-		if not ctypes.windll.user32.UnregisterClassW(self._classAtom, appInstance):
+		if not winBindings.user32.UnregisterClass(
+			# The class atom should be stored as the low word of the class name string pointer.
+			ctypes.cast(ctypes.c_void_p(self._classAtom), ctypes.wintypes.LPCWSTR),
+			appInstance,
+		):
 			log.error(
 				f"Error unregistering window class for {self.__class__.__qualname__}",
 				exc_info=ctypes.WinError(),
@@ -272,7 +366,7 @@ class CustomWindow(AutoPropertyObject):
 			or C{None} to call DefWindowProc.
 		@rtype: int or None
 		"""
-		return None
+		return
 
 	@staticmethod
 	@WNDPROC
@@ -280,12 +374,12 @@ class CustomWindow(AutoPropertyObject):
 		try:
 			inst = CustomWindow._hwndsToInstances[hwnd]
 		except KeyError:
-			log.debug("CustomWindow rawWindowProc called for unknown window %d" % hwnd)
-			return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wParam, lParam)
+			log.debug("CustomWindow rawWindowProc called for unknown window %d" % hwnd)  # noqa: UP031
+			return user32.DefWindowProc(hwnd, msg, wParam, lParam)
 		try:
 			res = inst.windowProc(hwnd, msg, wParam, lParam)
 			if res is not None:
 				return res
 		except:  # noqa: E722
 			log.exception("Error in wndProc")
-		return ctypes.windll.user32.DefWindowProcW(hwnd, msg, wParam, lParam)
+		return user32.DefWindowProc(hwnd, msg, wParam, lParam)

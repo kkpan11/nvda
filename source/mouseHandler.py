@@ -1,15 +1,13 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2016-2023 NV Access Limited
+# Copyright (C) 2016-2025 NV Access Limited
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass  # noqa: I001
 import time
 import wx
 import gui
 import tones
-import ctypes
 import winUser
 import queueHandler
 import api
@@ -25,6 +23,7 @@ from math import floor
 from contextlib import contextmanager
 import threading
 from winAPI.winUser.constants import SystemMetrics
+from winBindings import user32
 
 
 WM_MOUSEMOVE = 0x0200
@@ -123,31 +122,27 @@ def internal_mouseEvent(msg, x, y, injected):
 		elif msg in (WM_LBUTTONDOWN, WM_RBUTTONDOWN):
 			queueHandler.queueFunction(queueHandler.eventQueue, speech.cancelSpeech)
 	except:  # noqa: E722
-		log.error("", exc_info=True)
+		log.error("", exc_info=True)  # noqa: G201
 	return True
 
 
-def executeMouseEvent(flags, x, y, data=0):
+def executeMouseEvent(flags: int, x: int, y: int, data: int = 0) -> None:
 	"""
-	Mouse events generated with this rapper for L{winUser.mouse_event}
-	will be ignored by NVDA.
-	Consult https://docs.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-mouse_event
-	for detailed parameter documentation.
-	@param flags: Controls various aspects of mouse motion and button clicking.
-		The supplied value should be one or a combination of the C{winUser.MOUSEEVENTF_*} constants.
-	@type flags: int
-	@param x: The mouse's absolute position along the x-axis
+	Generates mouse events that will be ignored by NVDA.
+
+	.. seealso::
+		https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-mouse_event
+
+	:param flags: Controls various aspects of mouse motion and button clicking.
+		The supplied value should be one or a combination of the :var:`winUser.MOUSEEVENTF_*` constants.
+	:param x: The mouse's absolute position along the x-axis,
 		or its amount of motion since the last mouse event was generated.
-	@type x: int
-	@param y: The mouse's absolute position along the y-axis
+	:param y: The mouse's absolute position along the y-axis,
 		or its amount of motion since the last mouse event was generated.
-	@type y: int
-	@param data: Additional data depending on what flags are specified.
-		This defaults to 0.
-	@type data: int
+	:param data: Additional data depending on what flags are specified, default 0.
 	"""
 	with ignoreInjection():
-		winUser.mouse_event(flags, x, y, data, None)
+		winUser.mouse_event(flags, x, y, data, 0)
 
 
 def getMouseRestrictedToScreens(x, y, displays):
@@ -175,23 +170,23 @@ def getMouseRestrictedToScreens(x, y, displays):
 		)
 		edgeToMouse = mpos - mouseLimitedToScreen
 		distFromRectToMouseSqd = abs(edgeToMouse.x) + abs(edgeToMouse.y)
-		if closestDistValue == None or closestDistValue > distFromRectToMouseSqd:  # noqa: E711
+		if closestDistValue == None or closestDistValue > distFromRectToMouseSqd:
 			closestDistValue = distFromRectToMouseSqd
 			newXY = mouseLimitedToScreen
 
 	# drop any partial position information. Even the 99% of the way to the edge of a
 	# pixel is still in the pixel.
-	return (int(floor(newXY.x)), int(floor(newXY.y)))
+	return (int(floor(newXY.x)), int(floor(newXY.y)))  # noqa: RUF046
 
 
-def getMinMaxPoints(screenRect):
+def getMinMaxPoints(screenRect: wx.Rect) -> tuple[wx.Point, wx.Point]:
 	screenMin = screenRect.GetTopLeft()
 	screenDim = wx.Point(screenRect.GetWidth(), screenRect.GetHeight())
 	screenMax = screenMin + screenDim
 	return (screenMin, screenMax)
 
 
-def getTotalWidthAndHeightAndMinimumPosition(displays):
+def getTotalWidthAndHeightAndMinimumPosition(displays: list[wx.Rect]) -> tuple[int, int, wx.Point]:
 	"""Calculate the total screen width and height.
 
 	Depending on screen layouts the rectangles may overlap on the vertical or
@@ -201,13 +196,13 @@ def getTotalWidthAndHeightAndMinimumPosition(displays):
 	smallestX, smallestY, largestX, largestY = (None, None, None, None)
 	for screenRect in displays:
 		(screenMin, screenMax) = getMinMaxPoints(screenRect)
-		if smallestX == None or screenMin.x < smallestX:  # noqa: E711
+		if smallestX == None or screenMin.x < smallestX:
 			smallestX = screenMin.x
-		if smallestY == None or screenMin.y < smallestY:  # noqa: E711
+		if smallestY == None or screenMin.y < smallestY:
 			smallestY = screenMin.y
-		if largestX == None or screenMax.x > largestX:  # noqa: E711
+		if largestX == None or screenMax.x > largestX:
 			largestX = screenMax.x
-		if largestY == None or screenMax.y > largestY:  # noqa: E711
+		if largestY == None or screenMax.y > largestY:
 			largestY = screenMax.y
 
 	# get full range, including any "blank space" between monitors
@@ -249,7 +244,7 @@ def executeMouseMoveEvent(x, y):
 		eventHandler.executeEvent("mouseMove", mouseObject, x=x, y=y)
 		oldMouseObject = mouseObject
 	except:  # noqa: E722
-		log.error("api.notifyMouseMoved", exc_info=True)
+		log.error("api.notifyMouseMoved", exc_info=True)  # noqa: G201
 
 
 # Register internal mouse event
@@ -280,7 +275,7 @@ def _reportShape():
 
 
 def pumpAll():
-	global mouseMoved, curMousePos
+	global mouseMoved, curMousePos  # noqa: PLW0602
 	if mouseMoved:
 		mouseMoved = False
 		(x, y) = curMousePos
@@ -318,7 +313,7 @@ def getLogicalButtonFlags() -> LogicalButtonFlags:
 	taking into account the Windows user setting
 	for which button (left or right) is primary and which is secondary.
 	"""
-	swappedButtons = ctypes.windll.user32.GetSystemMetrics(SystemMetrics.SWAP_BUTTON)
+	swappedButtons = user32.GetSystemMetrics(SystemMetrics.SWAP_BUTTON)
 	if not swappedButtons:
 		return LogicalButtonFlags(
 			primaryDown=winUser.MOUSEEVENTF_LEFTDOWN,
@@ -338,7 +333,7 @@ def getLogicalButtonFlags() -> LogicalButtonFlags:
 def _doClick(
 	downFlag: int,
 	upFlag: int,
-	releaseDelay: Optional[float] = None,
+	releaseDelay: float | None = None,
 ):
 	executeMouseEvent(downFlag, 0, 0)
 	if releaseDelay:
@@ -346,7 +341,7 @@ def _doClick(
 	executeMouseEvent(upFlag, 0, 0)
 
 
-def doPrimaryClick(releaseDelay: Optional[float] = None):
+def doPrimaryClick(releaseDelay: float | None = None):
 	"""
 	Performs a primary mouse click at the current mouse pointer location.
 	The primary button is the one that usually activates or selects an item.
@@ -359,7 +354,7 @@ def doPrimaryClick(releaseDelay: Optional[float] = None):
 	_doClick(buttonFlags.primaryDown, buttonFlags.primaryUp, releaseDelay)
 
 
-def doSecondaryClick(releaseDelay: Optional[float] = None):
+def doSecondaryClick(releaseDelay: float | None = None):
 	"""
 	Performs a secondary mouse click at the current mouse pointer location.
 	The secondary button is the one that usually displays a context menu for an item when clicked.

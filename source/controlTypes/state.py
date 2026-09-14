@@ -6,7 +6,6 @@
 from enum import (
 	unique,
 )
-from typing import Dict
 
 from utils.displayString import DisplayStringIntEnum
 
@@ -102,12 +101,16 @@ class State(DisplayStringIntEnum):
 	HASPOPUP_GRID = setBit(48)
 	HASPOPUP_LIST = setBit(49)
 	HASPOPUP_TREE = setBit(50)
+	INTERNAL_LINK = setBit(51)
+	MULTISELECTABLE = setBit(52)
 
 
 STATES_SORTED = frozenset([State.SORTED, State.SORTED_ASCENDING, State.SORTED_DESCENDING])
 
+STATES_LINK_TYPE = frozenset([State.INTERNAL_LINK])
 
-_stateLabels: Dict[State, str] = {
+
+_stateLabels: dict[State, str] = {
 	# Translators: This is presented when a control or document is unavailable.
 	State.UNAVAILABLE: _("unavailable"),
 	# Translators: This is presented when a control has focus.
@@ -204,10 +207,16 @@ _stateLabels: Dict[State, str] = {
 	State.HASPOPUP_LIST: _("opens list"),
 	# Translators: Presented when a control has a pop-up tree.
 	State.HASPOPUP_TREE: _("opens tree"),
+	# Translators: Presented when a link destination points to the page containing the link.
+	# For example, links of a table of contents of a document with different sections.
+	State.INTERNAL_LINK: _("same page"),
+	# Translators: Presented when the control allows multiple selected objects.
+	# For example, a list box that allows selecting multiple items.
+	State.MULTISELECTABLE: _("multi-select"),
 }
 
 
-_negativeStateLabels: Dict[State, str] = {
+_negativeStateLabels: dict[State, str] = {
 	# Translators: This is presented when a selectable object (e.g. a list item) is not selected.
 	State.SELECTED: _("not selected"),
 	# Translators: This is presented when a button is not pressed.

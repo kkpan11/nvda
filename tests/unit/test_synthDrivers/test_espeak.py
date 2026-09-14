@@ -5,7 +5,7 @@
 
 """Unit tests for the eSpeak synth driver submodule."""
 
-import logging
+import logging  # noqa: I001
 import unittest
 
 from languageHandler import stripLocaleFromLangCode
@@ -13,13 +13,13 @@ import logHandler
 from speech.commands import LangChangeCommand
 from synthDrivers.espeak import SynthDriver
 from synthDrivers._espeak import _setVoiceByLanguage
-import nvwave
+from unittest import mock
 
 
 class FakeESpeakSynthDriver:
 	_language = "default"
-	_defaultLangToLocale = {"default": "en-gb"}
-	availableLanguages = {"fr", "fr-fr", "en-gb", "ta-ta"}
+	_defaultLangToLocale = {"default": "en-gb"}  # noqa: RUF012
+	availableLanguages = {"fr", "fr-fr", "en-gb", "ta-ta"}  # noqa: RUF012
 
 
 class TestSynthDriver_Logic(unittest.TestCase):
@@ -68,15 +68,14 @@ class TestSynthDriver_Integration(unittest.TestCase):
 	"""Perform integration testing for the eSpeak synth driver."""
 
 	def setUp(self) -> None:
-		# Prevent NVWave from causing an exception
-		# when running unit tests in AppVeyor
-		self._nvwaveOpenOld = nvwave.WavePlayer.open
-		nvwave.WavePlayer.open = lambda self: None
+		# WASAPI calls fail when unit testing, so mock out WasapiWavePlayer.
+		self._wavePlayerPatcher = mock.patch("nvwave.WavePlayer", autospec=True)
+		self._wavePlayerPatcher.start()
 		self._driver = SynthDriver()
 
 	def tearDown(self) -> None:
 		self._driver.terminate()
-		nvwave.WavePlayer.open = self._nvwaveOpenOld
+		self._wavePlayerPatcher.stop()
 
 	def test_defaultMappingAvailableLanguage(self):
 		"""Confirms language codes remapped by default are supported by eSpeak and are comprehensive."""
@@ -105,7 +104,7 @@ class TestSynthDriver_Integration(unittest.TestCase):
 			),
 		)
 
-		supportedLanguagesWithLocaleStripped = set(
+		supportedLanguagesWithLocaleStripped = set(  # noqa: C401
 			stripLocaleFromLangCode(lang) for lang in eSpeakAvailableLangs
 		)
 		unsupportedLanguagesWithoutLocale = supportedLanguagesWithLocaleStripped.difference(
@@ -126,16 +125,15 @@ class TestSynthDriver_Integration(unittest.TestCase):
 		Confirms that eSpeak can manually be switched to all of its supported languages with the locale removed.
 		This doesn't test automatic language switching.
 		"""
-		availableLangsWithoutLocale = set(
+		availableLangsWithoutLocale = set(  # noqa: C401
 			stripLocaleFromLangCode(lang) for lang in self._driver.availableLanguages
 		)
 		for langWithoutLocale in availableLangsWithoutLocale:
 			_setVoiceByLanguage(langWithoutLocale)
 			self.assertEqual(
 				langWithoutLocale,
-				self._driver.voice.split("\\")[
-					-1
-				],  # Language code is the last item, e.g. (gmw\en, roa\fr-CH)
+				# Language code is the last item, e.g. (gmw\en, roa\fr-CH)
+				stripLocaleFromLangCode(self._driver.voice.split("\\")[-1]),
 				msg="Language without locale not supported by eSpeak",
 			)
 

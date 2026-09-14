@@ -1,18 +1,16 @@
-# -*- coding: UTF-8 -*-
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2006-2023 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Cyrille Bougot
+# Copyright (C) 2006-2026 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Cyrille Bougot,
+# Leonard de Ruijter
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
 """Keyboard support"""
 
-import ctypes
+import ctypes  # noqa: I001
 import time
 import re
 import typing
 from typing import (
-	Tuple,
-	List,
 	Optional,
 	Any,
 )
@@ -35,16 +33,56 @@ import core
 import NVDAState
 from contextlib import contextmanager
 import threading
+import winBindings.kernel32
 import winKernel
+from winBindings import user32
 
 if typing.TYPE_CHECKING:
-	from NVDAObjects import NVDAObject  # noqa: F401
+	from NVDAObjects import NVDAObject
 	from watchdog import WatchdogObserver
 
 _watchdogObserver: typing.Optional["WatchdogObserver"] = None
 ignoreInjected = False
 _lastInjectedKeyUp: tuple[int, int] | None = None
 _injectionDoneEvent: int | None = None
+type _ModifierT = tuple[int, bool]  # noqa: PYI043
+_TO_UNICODE_EX_FLAG_NO_STATE_CHANGE = 0x04
+_TO_UNICODE_EX_BUFFER_LENGTH = 5
+_KEY_PRESSED_STATE = 0x80
+
+
+def _getKeyStates(
+	modifierVkCodes: list[int],
+	ignoredModifier: int | None = None,
+) -> ctypes.Array:
+	"""Return keyboard state for ToUnicodeEx while forcing selected modifiers pressed."""
+	states: ctypes.Array = (ctypes.c_ubyte * 256)()
+	for i in range(256):
+		if i in modifierVkCodes and i != ignoredModifier:
+			states[i] = _KEY_PRESSED_STATE
+		else:
+			states[i] = user32.GetKeyState(i)
+	return states
+
+
+def _toUnicodeEx(
+	vkCode: int,
+	scanCode: int,
+	states: ctypes.Array,
+	buffer: ctypes.Array,
+	keyboardLayout: int,
+) -> int:
+	"""Call ToUnicodeEx without modifying keyboard state."""
+	return user32.ToUnicodeEx(
+		vkCode,
+		scanCode,
+		states,
+		buffer,
+		len(buffer),
+		_TO_UNICODE_EX_FLAG_NO_STATE_CHANGE,
+		keyboardLayout,
+	)
+
 
 # Fake vk codes.
 # These constants should be assigned to the name that NVDA will use for the key.
@@ -96,19 +134,20 @@ def passNextKeyThrough():
 
 
 def isNVDAModifierKey(vkCode: int, extended: bool) -> bool:
-	if (
-		(config.conf["keyboard"]["NVDAModifierKeys"] & NVDAKey.NUMPAD_INSERT)
-		and vkCode == winUser.VK_INSERT
-		and not extended
+	if (  # noqa: SIM103
+		(
+			(config.conf["keyboard"]["NVDAModifierKeys"] & NVDAKey.NUMPAD_INSERT)
+			and vkCode == winUser.VK_INSERT
+			and not extended
+		)
+		or (
+			(config.conf["keyboard"]["NVDAModifierKeys"] & NVDAKey.EXTENDED_INSERT)
+			and vkCode == winUser.VK_INSERT
+			and extended
+		)
+		or (config.conf["keyboard"]["NVDAModifierKeys"] & NVDAKey.CAPS_LOCK)
+		and vkCode == winUser.VK_CAPITAL
 	):
-		return True
-	elif (
-		(config.conf["keyboard"]["NVDAModifierKeys"] & NVDAKey.EXTENDED_INSERT)
-		and vkCode == winUser.VK_INSERT
-		and extended
-	):
-		return True
-	elif (config.conf["keyboard"]["NVDAModifierKeys"] & NVDAKey.CAPS_LOCK) and vkCode == winUser.VK_CAPITAL:
 		return True
 	else:
 		return False
@@ -122,10 +161,10 @@ def __getattr__(attrName: str) -> Any:
 			"Consider using the class config.configFlags.NVDAKey instead.",
 		)
 		return ("capslock", "numpadinsert", "insert")
-	raise AttributeError(f"module {repr(__name__)} has no attribute {repr(attrName)}")
+	raise AttributeError(f"module {__name__!r} has no attribute {attrName!r}")
 
 
-def getNVDAModifierKeys() -> List[Tuple[int, Optional[bool]]]:
+def getNVDAModifierKeys() -> list[tuple[int, bool | None]]:
 	keys = []
 	if config.conf["keyboard"]["NVDAModifierKeys"] & NVDAKey.EXTENDED_INSERT:
 		keys.append(vkCodes.byName["insert"])
@@ -140,7 +179,7 @@ def shouldUseToUnicodeEx(focus: Optional["NVDAObject"] = None):
 	"Returns whether to use ToUnicodeEx to determine typed characters."
 	if not focus:
 		focus = api.getFocusObject()
-	from NVDAObjects.window import Window
+	from NVDAObjects.window import Window  # noqa: I001
 	from NVDAObjects.behaviors import KeyboardHandlerBasedTypedCharSupport
 
 	return (
@@ -149,31 +188,40 @@ def shouldUseToUnicodeEx(focus: Optional["NVDAObject"] = None):
 		# This is only possible in Windows 10 1607 and above
 		and winVersion.getWinVer() >= winVersion.WIN10_1607
 		and (  # Either of
-			# We couldn't inject in-process, and its not a legacy console window without keyboard support.
+			# The focus is within a UWP app, where WM_CHAR never gets sent
+			focus.windowClassName.startswith("Windows.UI.Core")
+			# Or we couldn't inject in-process, and its not a legacy console window without keyboard support.
 			# console windows have their own specific typed character support.
-			(not focus.appModule.helperLocalBindingHandle and focus.windowClassName != "ConsoleWindowClass")
-			# or the focus is within a UWP app, where WM_CHAR never gets sent
-			or focus.windowClassName.startswith("Windows.UI.Core")
+			or (
+				not (focus.appModule and focus.appModule.helperLocalBindingHandle)
+				and focus.windowClassName != "ConsoleWindowClass"
+			)
 			# Or this is a console with keyboard support, where WM_CHAR messages are doubled
 			or isinstance(focus, KeyboardHandlerBasedTypedCharSupport)
 		)
 	)
 
 
-def internal_keyDownEvent(vkCode, scanCode, extended, injected):
-	"""Event called by winInputHook when it receives a keyDown."""
+def internal_keyDownEvent(vkCode: int, scanCode: int, extended: bool, injected: bool) -> bool:
+	"""Event called by winInputHook when it receives a keyDown.
+
+	:param vkCode: The virtual key code.
+	:param scanCode: The hardware scan code.
+	:param extended: Whether this is an extended key.
+	:param injected: Whether the event was injected by software rather than generated by the keyboard.
+	:return: ``True`` to pass the key on to the operating system, ``False`` to block it.
+	"""
+	if not inputCore.decide_handleRawKey.decide(
+		vkCode=vkCode,
+		scanCode=scanCode,
+		extended=extended,
+		pressed=True,
+		injected=injected,
+	):
+		return False
 	gestureExecuted = False
 	try:
-		global \
-			lastNVDAModifier, \
-			lastNVDAModifierReleaseTime, \
-			bypassNVDAModifier, \
-			passKeyThroughCount, \
-			lastPassThroughKeyDown, \
-			currentModifiers, \
-			keyCounter, \
-			stickyNVDAModifier, \
-			stickyNVDAModifierLocked
+		global lastNVDAModifier, lastNVDAModifierReleaseTime, bypassNVDAModifier, passKeyThroughCount, lastPassThroughKeyDown, currentModifiers, keyCounter, stickyNVDAModifier, stickyNVDAModifierLocked  # noqa: PLW0602
 		# Injected keys should be ignored in some cases.
 		if injected and (ignoreInjected or not config.conf["keyboard"]["handleInjectedKeys"]):
 			return True
@@ -203,7 +251,10 @@ def internal_keyDownEvent(vkCode, scanCode, extended, injected):
 			or (
 				keyCode == lastNVDAModifier
 				and lastNVDAModifierReleaseTime
-				and time.time() - lastNVDAModifierReleaseTime < 0.5
+				and (
+					time.time() - lastNVDAModifierReleaseTime
+					< config.conf["keyboard"]["multiPressTimeout"] / 1000
+				)
 			)
 		):
 			# The user wants the key to serve its normal function instead of acting as an NVDA modifier key.
@@ -268,10 +319,10 @@ def internal_keyDownEvent(vkCode, scanCode, extended, injected):
 				trappedKeys.add(keyCode)
 				return False
 	except:  # noqa: E722
-		log.error("internal_keyDownEvent", exc_info=True)
+		log.error("internal_keyDownEvent", exc_info=True)  # noqa: G201
 	finally:
 		if _watchdogObserver.isAttemptingRecovery:
-			return True
+			return True  # noqa: B012
 		# #6017: handle typed characters in Win10 RS2 and above where we can't detect typed characters in-process
 		# This code must be in the 'finally' block as code above returns in several places yet we still want to execute this particular code.
 		focus = api.getFocusObject()
@@ -283,14 +334,14 @@ def internal_keyDownEvent(vkCode, scanCode, extended, injected):
 			and not isNVDAModifierKey(vkCode, extended)
 			and vkCode not in KeyboardInputGesture.NORMAL_MODIFIER_KEYS
 		):
-			keyStates = (ctypes.c_byte * 256)()
+			keyStates = (ctypes.c_ubyte * 256)()
 			for k in range(256):
-				keyStates[k] = ctypes.windll.user32.GetKeyState(k)
+				keyStates[k] = user32.GetKeyState(k)
 			charBuf = ctypes.create_unicode_buffer(5)
-			hkl = ctypes.windll.user32.GetKeyboardLayout(focus.windowThreadID)
+			hkl = user32.GetKeyboardLayout(focus.windowThreadID)
 			# In previous Windows builds, calling ToUnicodeEx would destroy keyboard buffer state and therefore cause the app to not produce the right WM_CHAR message.
 			# However, ToUnicodeEx now can take a new flag of 0x4, which stops it from destroying keyboard state, thus allowing us to safely call it here.
-			res = ctypes.windll.user32.ToUnicodeEx(
+			res = user32.ToUnicodeEx(
 				vkCode,
 				scanCode,
 				keyStates,
@@ -305,16 +356,25 @@ def internal_keyDownEvent(vkCode, scanCode, extended, injected):
 	return True
 
 
-def internal_keyUpEvent(vkCode, scanCode, extended, injected):
-	"""Event called by winInputHook when it receives a keyUp."""
+def internal_keyUpEvent(vkCode: int, scanCode: int, extended: bool, injected: bool) -> bool:
+	"""Event called by winInputHook when it receives a keyUp.
+
+	:param vkCode: The virtual key code.
+	:param scanCode: The hardware scan code.
+	:param extended: Whether this is an extended key.
+	:param injected: Whether the event was injected by software rather than generated by the keyboard.
+	:return: ``True`` to pass the key on to the operating system, ``False`` to block it.
+	"""
+	if not inputCore.decide_handleRawKey.decide(
+		vkCode=vkCode,
+		scanCode=scanCode,
+		extended=extended,
+		pressed=False,
+		injected=injected,
+	):
+		return False
 	try:
-		global \
-			lastNVDAModifier, \
-			lastNVDAModifierReleaseTime, \
-			bypassNVDAModifier, \
-			passKeyThroughCount, \
-			lastPassThroughKeyDown, \
-			currentModifiers
+		global lastNVDAModifier, lastNVDAModifierReleaseTime, bypassNVDAModifier, passKeyThroughCount, lastPassThroughKeyDown, currentModifiers  # noqa: PLW0602
 		keyCode = (vkCode, extended)
 		# Injected keys should be ignored in some cases.
 		if injected:
@@ -322,7 +382,7 @@ def internal_keyUpEvent(vkCode, scanCode, extended, injected):
 				return True
 			if ignoreInjected:
 				if keyCode == _lastInjectedKeyUp:
-					winKernel.kernel32.SetEvent(_injectionDoneEvent)
+					winBindings.kernel32.SetEvent(_injectionDoneEvent)
 				return True
 
 		if passKeyThroughCount >= 1:
@@ -352,7 +412,7 @@ def internal_keyUpEvent(vkCode, scanCode, extended, injected):
 			trappedKeys.remove(keyCode)
 			return False
 	except:  # noqa: E722
-		log.error("", exc_info=True)
+		log.error("", exc_info=True)  # noqa: G201
 	return True
 
 
@@ -380,7 +440,7 @@ def getInputHkl():
 		thread = focus.windowThreadID
 	else:
 		thread = 0
-	return winUser.user32.GetKeyboardLayout(thread)
+	return user32.GetKeyboardLayout(thread)
 
 
 def canModifiersPerformAction(modifiers):
@@ -402,7 +462,7 @@ def canModifiersPerformAction(modifiers):
 		elif (vk, ext) not in trappedKeys:
 			# Trapped modifiers aren't relevant.
 			other = True
-	if control and shift and not other:
+	if control and shift and not other:  # noqa: SIM103
 		# Shift+control switches keyboard layouts.
 		return True
 	return False
@@ -414,7 +474,7 @@ class KeyboardInputGesture(inputCore.InputGesture):
 	#: All normal modifier keys, where modifier vk codes are mapped to a more general modifier vk code
 	# or C{None} if not applicable.
 	#: @type: dict
-	NORMAL_MODIFIER_KEYS = {
+	NORMAL_MODIFIER_KEYS = {  # noqa: RUF012
 		winUser.VK_LCONTROL: winUser.VK_CONTROL,
 		winUser.VK_RCONTROL: winUser.VK_CONTROL,
 		winUser.VK_CONTROL: None,
@@ -435,7 +495,7 @@ class KeyboardInputGesture(inputCore.InputGesture):
 
 	#: All possible keyboard layouts, where layout names are mapped to localised layout names.
 	#: @type: dict
-	LAYOUTS = {
+	LAYOUTS = {  # noqa: RUF012
 		# Translators: One of the keyboard layouts for NVDA.
 		"desktop": _("desktop"),
 		# Translators: One of the keyboard layouts for NVDA.
@@ -466,13 +526,22 @@ class KeyboardInputGesture(inputCore.InputGesture):
 			# Some numpad keys have the same vkCode regardless of numlock.
 			# For these keys, treat numlock as a modifier.
 			modifiers.add((winUser.VK_NUMLOCK, False))
-		self.generalizedModifiers = set(
-			(self.NORMAL_MODIFIER_KEYS.get(mod) or mod, extended) for mod, extended in modifiers
-		)
+		self.generalizedModifiers = self._generalizeModifiers(modifiers)
 		self.vkCode = vkCode
 		self.scanCode = scanCode
 		self.isExtended = isExtended
-		super(KeyboardInputGesture, self).__init__()
+		super().__init__()
+
+	@classmethod
+	def _generalizeModifiers(cls, modifiers: _ModifierT) -> _ModifierT:
+		"""Return the input set, with specific modifiers replaced with their general equivalents.
+
+		Replaces keys like leftAlt or rightCtrl with their generic alternatives (i.e. alt or ctrl).
+
+		:param modifiers: Set of (vkCode, extended) tuples.
+		:return: A copy of the input set with the specific modifiers replaced with their general equivalents.
+		"""
+		return set((cls.NORMAL_MODIFIER_KEYS.get(mod) or mod, extended) for mod, extended in modifiers)  # noqa: C401
 
 	def _get_bypassInputHelp(self):
 		# #4226: Numlock must always be handled normally otherwise the Keyboard controller and Windows can get out of synk wih each other in regard to this key state.
@@ -497,8 +566,10 @@ class KeyboardInputGesture(inputCore.InputGesture):
 		if self.vkCode == vkCodes.VK_PACKET:
 			# Unicode character from non-keyboard input.
 			return chr(self.scanCode)
-		vkChar = winUser.user32.MapVirtualKeyExW(self.vkCode, winUser.MAPVK_VK_TO_CHAR, getInputHkl())
-		if vkChar > 0:
+		vkChar = user32.MapVirtualKeyEx(self.vkCode, winUser.MAPVK_VK_TO_CHAR, getInputHkl())
+		# the highest bit of a 32 bit value denotes a dead key
+		DEAD_KEY_FLAG = 0x80000000
+		if vkChar > 0 and not (vkChar & DEAD_KEY_FLAG):
 			if vkChar == 43:  # "+"
 				# A gesture identifier can't include "+" except as a separator.
 				return "plus"
@@ -508,7 +579,7 @@ class KeyboardInputGesture(inputCore.InputGesture):
 			# #3468: This key is unknown to Windows.
 			# GetKeyNameText often returns something inappropriate in these cases
 			# due to disregarding the extended flag.
-			return "unknown_%02x" % self.scanCode
+			return "unknown_%02x" % self.scanCode  # noqa: UP031
 		return winUser.getKeyNameText(self.scanCode, self.isExtended)
 
 	def _get_modifierNames(self):
@@ -533,11 +604,90 @@ class KeyboardInputGesture(inputCore.InputGesture):
 			for key in self._keyNamesInDisplayOrder
 		)
 
+	def _get_character(self) -> str | None:
+		"""Get the character this key combination would produce.
+
+		Uses ToUnicodeEx with the no-state-change flag to avoid modifying keyboard state.
+		For dead keys, returns the dead key character itself.
+		Returns None for unprintable characters or when Windows key is pressed.
+		"""
+		try:
+			threadID = api.getFocusObject().windowThreadID
+		except AttributeError:
+			return None
+		keyboardLayout = user32.GetKeyboardLayout(threadID)
+		buffer = ctypes.create_unicode_buffer(_TO_UNICODE_EX_BUFFER_LENGTH)
+
+		modifierVkCodes: list[int] = []
+		hasWindowsModifier = False
+		for mod, _ in self.modifiers:
+			modifier = self.NORMAL_MODIFIER_KEYS.get(mod)
+			if modifier is None and mod in self.NORMAL_MODIFIER_KEYS.values():
+				modifier = mod
+			if modifier == VK_WIN:
+				hasWindowsModifier = True
+			elif modifier is not None:
+				modifierVkCodes.append(modifier)
+
+		# Characters with the Windows key are invalid.
+		if hasWindowsModifier:
+			return None
+
+		states = _getKeyStates(modifierVkCodes)
+
+		res = _toUnicodeEx(self.vkCode, self.scanCode, states, buffer, keyboardLayout)
+
+		# res < 0 means dead key - return the dead key character
+		if res < 0:
+			# Dead key: buffer contains the dead key character
+			# Call ToUnicodeEx again to get and clear the dead key from buffer
+			_toUnicodeEx(self.vkCode, self.scanCode, states, buffer, keyboardLayout)
+			return buffer.value[:1] if buffer.value else None
+
+		if res == 0:
+			return None
+
+		# Check alt key behavior - alt sometimes gives same character as without alt
+		if winUser.VK_MENU in modifierVkCodes:
+			altStates = _getKeyStates(modifierVkCodes, ignoredModifier=winUser.VK_MENU)
+			newBuffer = ctypes.create_unicode_buffer(_TO_UNICODE_EX_BUFFER_LENGTH)
+			_toUnicodeEx(
+				self.vkCode,
+				self.scanCode,
+				altStates,
+				newBuffer,
+				keyboardLayout,
+			)
+			# If same character with and without alt, it's not valid
+			if buffer.value == newBuffer.value:
+				return None
+
+		return buffer.value[:res]
+
+	def _get_inputHelpCharacter(self) -> str | None:
+		"""Returns the character this gesture should additionally report in input help mode."""
+		# Commands keep original behavior, even if they also produce a printable character.
+		if any(isNVDAModifierKey(mod, ext) for mod, ext in self.modifiers) or self.script:
+			return None
+
+		char = self.character
+		if not char:
+			return None
+
+		if not char.isprintable():
+			return None
+
+		# Avoid duplicating only when the display name already matches the produced character.
+		if self.displayName == char:
+			return None
+
+		return char
+
 	def _get_identifiers(self):
 		keyName = "+".join(self._keyNamesInDisplayOrder)
 		return (
-			"kb({layout}):{key}".format(layout=self.layout, key=keyName),
-			"kb:{key}".format(key=keyName),
+			f"kb({self.layout}):{keyName}",
+			f"kb:{keyName}",
 		)
 
 	def _get_shouldReportAsCommand(self):
@@ -562,7 +712,7 @@ class KeyboardInputGesture(inputCore.InputGesture):
 			return False
 		# If this key has modifiers other than shift, it is a command and not a character; e.g. shift+f is a character, but control+f is a command.
 		modifiers = self.generalizedModifiers
-		if modifiers and (len(modifiers) > 1 or tuple(modifiers)[0][0] != winUser.VK_SHIFT):
+		if modifiers and (len(modifiers) > 1 or tuple(modifiers)[0][0] != winUser.VK_SHIFT):  # noqa: RUF015, SIM103
 			return False
 		return True
 
@@ -614,7 +764,7 @@ class KeyboardInputGesture(inputCore.InputGesture):
 			# it is already too late.
 			with ignoreInjection():
 				winUser.keybd_event(winUser.VK_NONE, 0, 0, 0)
-				winUser.keybd_event(winUser.VK_NONE, 0, winUser.KEYEVENTF_KEYUP, 0)
+				winUser.keybd_event(winUser.VK_NONE, 0, user32.KEYEVENTF.KEYUP, 0)
 		# Now actually execute the script.
 		super().executeScript(script)
 
@@ -634,6 +784,9 @@ class KeyboardInputGesture(inputCore.InputGesture):
 					# Already down.
 					continue
 				vk = winUser.VK_LWIN
+			elif vk == winUser.VK_NUMLOCK:
+				# Numlock is considered a modifier by NVDA but never by the OS.
+				continue
 			elif winUser.getKeyState(vk) & 32768:
 				# Already down.
 				continue
@@ -723,6 +876,7 @@ class KeyboardInputGesture(inputCore.InputGesture):
 		keys = set(keys.split("+"))
 		names = []
 		main = None
+		numlock = None
 		try:
 			# If present, the NVDA key should appear first.
 			keys.remove("nvda")
@@ -739,9 +893,15 @@ class KeyboardInputGesture(inputCore.InputGesture):
 			label = localizedKeyLabels.get(key, key)
 			if vk in cls.NORMAL_MODIFIER_KEYS:
 				names.append(label)
+			elif vk == winUser.VK_NUMLOCK:
+				# Numlock can be both modifier or main key so handle it separately and add it at the end after modifiers
+				# but before main key
+				numlock = label
 			else:
 				# The main key must be last, so handle that outside the loop.
 				main = label
+		if numlock is not None:
+			names.append(numlock)
 		if main is not None:
 			# If there is no main key, this gesture identifier only contains modifiers.
 			names.append(main)
@@ -767,7 +927,7 @@ def injectRawKeyboardInput(isPress, code, isExtended):
 	if isExtended:
 		# Change what we pass to MapVirtualKeyEx, but don't change what NVDA gets.
 		mapScan |= 0xE000
-	vkCode = winUser.user32.MapVirtualKeyExW(mapScan, winUser.MAPVK_VSC_TO_VK_EX, getInputHkl())
+	vkCode = user32.MapVirtualKeyEx(mapScan, winUser.MAPVK_VSC_TO_VK_EX, getInputHkl())
 	flags = 0
 	if not isPress:
 		flags |= 2

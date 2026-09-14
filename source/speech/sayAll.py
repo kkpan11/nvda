@@ -1,21 +1,22 @@
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2006-2024 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Bill Dengler,
-# Julien Cochuyt, Cyrille Bougot
+# Copyright (C) 2006-2026 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Babbage B.V., Bill Dengler,
+# Julien Cochuyt, Cyrille Bougot, Leonard de Ruijter
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-from abc import ABCMeta, abstractmethod
+from abc import ABCMeta, abstractmethod  # noqa: I001
 from enum import IntEnum
-from typing import Callable, TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
+from collections.abc import Callable
 import weakref
 import garbageHandler
 from logHandler import log
 import config
 import controlTypes
 import api
+import systemUtils
 import textInfos
 import queueHandler
-import winKernel
 from utils.security import objectBelowLockScreenAndWindowsIsLocked
 
 from .commands import CallbackCommand, EndUtteranceCommand
@@ -27,7 +28,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-	import NVDAObjects
+	import NVDAObjects  # noqa: I001
 	from .speech import (
 		getTextInfoSpeech,
 		SpeakTextInfoState,
@@ -108,8 +109,8 @@ class _SayAllHandler:
 	def readText(
 		self,
 		cursor: CURSOR,
-		startPos: Optional[textInfos.TextInfo] = None,
-		nextLineFunc: Optional[Callable[[textInfos.TextInfo], textInfos.TextInfo]] = None,
+		startPos: textInfos.TextInfo | None = None,
+		nextLineFunc: Callable[[textInfos.TextInfo], textInfos.TextInfo] | None = None,
 		shouldUpdateCaret: bool = True,
 		startedFromScript: bool | None = False,
 	) -> None:
@@ -137,12 +138,33 @@ class _SayAllHandler:
 			log.debugWarning("Unable to make reader", exc_info=True)
 			return
 		self._getActiveSayAll = weakref.ref(reader)
-		reader.nextLine()
+		reader.next()
 
 
-class _ObjectsReader(garbageHandler.TrackedObject):
-	def __init__(self, handler: _SayAllHandler, root: "NVDAObjects.NVDAObject"):
+class _Reader(garbageHandler.TrackedObject, metaclass=ABCMeta):
+	"""Base class for readers in say all."""
+
+	def __init__(self, handler: _SayAllHandler):
 		self.handler = handler
+		systemUtils.preventSystemIdle(persistent=True)
+
+	@abstractmethod
+	def next(self): ...
+
+	@abstractmethod
+	def stop(self):
+		"""Stops the reader."""
+		systemUtils.resetThreadExecutionState()
+
+	def __del__(self):
+		self.stop()
+
+
+class _ObjectsReader(_Reader):
+	"""Manages continuous reading of objects."""
+
+	def __init__(self, handler: _SayAllHandler, root: "NVDAObjects.NVDAObject"):
+		super().__init__(handler)
 		self.walker = self.walk(root)
 		self.prevObj = None
 
@@ -150,7 +172,7 @@ class _ObjectsReader(garbageHandler.TrackedObject):
 		yield obj
 		child = obj.simpleFirstChild
 		while child:
-			for descendant in self.walk(child):
+			for descendant in self.walk(child):  # noqa: UP028
 				yield descendant
 			child = child.simpleNext
 
@@ -158,14 +180,13 @@ class _ObjectsReader(garbageHandler.TrackedObject):
 		if not self.walker:
 			# We were stopped.
 			return
-		if self.prevObj:
+		if self.prevObj:  # noqa: SIM102
 			# We just started speaking this object, so move the navigator to it.
 			if not api.setNavigatorObject(
 				self.prevObj,
 				isFocus=self.handler.lastSayAllMode == CURSOR.CARET,
 			):
 				return
-			winKernel.SetThreadExecutionState(winKernel.ES_SYSTEM_REQUIRED)
 		# Move onto the next object.
 		self.prevObj = obj = next(self.walker, None)
 		if not obj:
@@ -179,10 +200,13 @@ class _ObjectsReader(garbageHandler.TrackedObject):
 		)
 
 	def stop(self):
+		if not self.walker:
+			return
 		self.walker = None
+		super().stop()
 
 
-class _TextReader(garbageHandler.TrackedObject, metaclass=ABCMeta):
+class _TextReader(_Reader):
 	"""Manages continuous reading of text.
 	This is intended for internal use only.
 
@@ -207,7 +231,7 @@ class _TextReader(garbageHandler.TrackedObject, metaclass=ABCMeta):
 
 	def __init__(self, handler: _SayAllHandler):
 		self.reader = None
-		self.handler = handler
+		super().__init__(handler)
 		self.trigger = SayAllProfileTrigger()
 		self.reader = self.getInitialTextInfo()
 		# #10899: SayAll profile can't be activated earlier because they may not be anything to read
@@ -263,6 +287,9 @@ class _TextReader(garbageHandler.TrackedObject, metaclass=ABCMeta):
 			self.finish()
 			return False
 
+	def next(self):
+		self.nextLine()
+
 	def nextLine(self):
 		if not self.reader:
 			log.debug("no self.reader")
@@ -281,7 +308,7 @@ class _TextReader(garbageHandler.TrackedObject, metaclass=ABCMeta):
 			self.finish()
 			return
 
-		if not self.initialIteration or not self.shouldReadInitialPosition():
+		if not self.initialIteration or not self.shouldReadInitialPosition():  # noqa: SIM102
 			if not self.nextLineImpl():
 				return
 		self.initialIteration = False
@@ -339,7 +366,6 @@ class _TextReader(garbageHandler.TrackedObject, metaclass=ABCMeta):
 		state.updateObj()
 		updater = obj.makeTextInfo(bookmark)
 		self.updateCaret(updater)
-		winKernel.SetThreadExecutionState(winKernel.ES_SYSTEM_REQUIRED)
 		if self.numBufferedLines == 0:
 			# This was the last line spoken, so move on.
 			self.nextLine()
@@ -378,9 +404,7 @@ class _TextReader(garbageHandler.TrackedObject, metaclass=ABCMeta):
 		self.reader = None
 		self.trigger.exit()
 		self.trigger = None
-
-	def __del__(self):
-		self.stop()
+		super().stop()
 
 
 class _CaretTextReader(_TextReader):
@@ -391,7 +415,16 @@ class _CaretTextReader(_TextReader):
 			raise NotImplementedError("Unable to make TextInfo: ", e)
 
 	def updateCaret(self, updater: textInfos.TextInfo) -> None:
+		obj = updater.obj
 		updater.updateCaret()
+		# #3287: cursor managers move the caret without firing an OS caret event,
+		# so we need to communicate movement to handlers explicitly.
+		if api.isCursorManager(obj):
+			import braille
+			import vision
+
+			braille.handler.handleCaretMove(obj)
+			vision.handler.handleCaretMove(obj)
 		if config.conf["reviewCursor"]["followCaret"]:
 			api.setReviewPosition(updater, isCaret=True)
 
@@ -408,8 +441,8 @@ class _TableTextReader(_CaretTextReader):
 	def __init__(
 		self,
 		handler: _SayAllHandler,
-		startPos: Optional[textInfos.TextInfo] = None,
-		nextLineFunc: Optional[Callable[[textInfos.TextInfo], textInfos.TextInfo]] = None,
+		startPos: textInfos.TextInfo | None = None,
+		nextLineFunc: Callable[[textInfos.TextInfo], textInfos.TextInfo] | None = None,
 		shouldUpdateCaret: bool = True,
 	):
 		self.startPos = startPos

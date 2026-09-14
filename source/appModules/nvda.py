@@ -1,16 +1,16 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2008-2024 NV Access Limited, James Teh, Michael Curran, Leonard de Ruijter, Reef Turner,
+# Copyright (C) 2008-2025 NV Access Limited, James Teh, Michael Curran, Leonard de Ruijter, Reef Turner,
 # Julien Cochuyt
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 
 
-import typing
+import typing  # noqa: I001
 
 import appModuleHandler
 import api
+import buildVersion
 import controlTypes
-import versionInfo
 from NVDAObjects.IAccessible import IAccessible
 from baseObject import ScriptableObject
 import gui
@@ -31,7 +31,7 @@ class NvdaDialog(IAccessible):
 	"""Fix to ensure NVDA message dialogs get reported when they pop up."""
 
 	def _get_presentationType(self):
-		presType = super(NvdaDialog, self).presentationType
+		presType = super().presentationType
 		# Sometimes, NVDA message dialogs briefly report the invisible state
 		# after they're focused.
 		# This causes them to be treated as unavailable and they are thus not reported.
@@ -146,7 +146,7 @@ class NvdaPythonConsoleUIOutputCtrl(ScriptableObject):
 				speech.speakMessage(_("Bottom"))
 				return
 		else:
-			raise ValueError("Unexpected direction: {!r}".format(direction))
+			raise ValueError(f"Unexpected direction: {direction!r}")
 		if select:
 			consoleUI.outputCtrl.Freeze()
 			anchorPos = startPos if self.isTextSelectionAnchoredAtStart else endPos
@@ -199,7 +199,7 @@ class AppModule(appModuleHandler.AppModule):
 		# It seems that context menus always get the name "context" and this cannot be overridden.
 		# Fudge the name of the NVDA system tray menu to make it more friendly.
 		if self.isNvdaMenu(obj):
-			obj.name = versionInfo.name
+			obj.name = buildVersion.name
 
 	def event_gainFocus(self, obj, nextHandler):
 		if obj.role == controlTypes.Role.UNKNOWN and controlTypes.State.INVISIBLE in obj.states:
@@ -226,7 +226,7 @@ class AppModule(appModuleHandler.AppModule):
 		windowHandle = obj.windowHandle
 		from gui.settingsDialogs import NvdaSettingsDialogWindowHandle
 
-		if windowHandle == NvdaSettingsDialogWindowHandle:
+		if windowHandle == NvdaSettingsDialogWindowHandle:  # noqa: SIM103
 			return True
 		return False
 

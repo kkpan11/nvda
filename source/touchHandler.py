@@ -1,7 +1,7 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2012-2023 NV Access Limited, Joseph Lee, Babbage B.V.
+# Copyright (C) 2012-2026 NV Access Limited, Joseph Lee, Babbage B.V., Kefas Lungu
 
 """handles touchscreen interaction.
 Used to provide input gestures for touchscreens, touch modes and other support facilities.
@@ -9,29 +9,99 @@ In order to use touch features, NVDA must be installed on a touchscreen computer
 """
 
 import threading
-from ctypes import *  # noqa: F403
-from ctypes import windll
-from ctypes.wintypes import *  # noqa: F403
+from functools import cached_property
+from typing import (
+	TYPE_CHECKING,
+	Self,
+)
+
+if TYPE_CHECKING:
+	import browseMode
+
+from ctypes import (  # noqa: I001
+	byref,
+	Structure,
+	c_void_p,
+	sizeof,
+	cast,
+	c_int,
+	c_uint32,
+	c_uint64,
+)
+from ctypes.wintypes import (
+	LPCWSTR,
+	HANDLE,
+	HWND,
+	DWORD,
+	POINT,
+	MSG,
+	RECT,
+)
 import re
+from winAPI.winUser.constants import SystemMetrics
+import winBindings.kernel32
+import winBindings.gdi32
+from winBindings import user32
 import gui
 import config
+import winBindings.oleacc
 import winUser
 import inputCore
 import screenExplorer
 from logHandler import log
 import touchTracker
+from touchTracker import TouchAction, TouchEdge
 import core
 import systemUtils
+from utils import _deprecate
+from utils.displayString import DisplayStringStrEnum
+from treeInterceptorHandler import post_browseModeStateChange
+
+__getattr__ = _deprecate.handleDeprecations(
+	_deprecate.MovedSymbol(
+		"SM_MAXIMUMTOUCHES",
+		"winAPI.winUser.constants",
+		"SystemMetrics",
+		"MAXIMUM_TOUCHES",
+	),
+	_deprecate.RemovedSymbol(
+		"touchModeLabels",
+		{
+			"text": _("text mode"),
+			"object": _("object mode"),
+			"browse": _("browse mode"),
+		},
+		message="Use touchHandler.TouchMode enum instead.",
+	),
+)
 
 
-availableTouchModes = ["text", "object"]
+class TouchMode(DisplayStringStrEnum):
+	"""Available touch screen navigation modes."""
 
-touchModeLabels = {
-	"text": _("text mode"),
-	"object": _("object mode"),
-}
+	TEXT = "text"
+	OBJECT = "object"
+	BROWSE = "browse"
 
-SM_MAXIMUMTOUCHES = 95
+	@cached_property
+	def _displayStringLabels(self) -> dict[Self, str]:
+		return {
+			# Translators: The name of a touch mode.
+			TouchMode.TEXT: _("text mode"),
+			# Translators: The name of a touch mode.
+			TouchMode.OBJECT: _("object mode"),
+			# Translators: The name of a touch mode used when in browse mode.
+			TouchMode.BROWSE: _("browse mode"),
+		}
+
+
+availableTouchModes: list[TouchMode | str] = [TouchMode.TEXT, TouchMode.OBJECT]
+"""List of touch modes available for cycling.
+
+Add-ons may append custom mode name strings to this list to register new touch modes.
+The mode name string is used in gesture identifiers (e.g. ``ts(mymode):flickRight``).
+"""
+
 HWND_MESSAGE = -3
 
 WM_QUIT = 18
@@ -66,35 +136,59 @@ POINTER_MESSAGE_FLAG_CONFIDENCE = 0x200
 POINTER_MESSAGE_FLAG_CANCELED = 0x400
 
 
-class POINTER_INFO(Structure):  # noqa: F405
+def _browseModeStateChange(
+	browseMode: bool = False,
+	interceptor: "browseMode.BrowseModeTreeInterceptor | None" = None,
+	**kwargs,
+) -> None:
+	if not handler:
+		return
+
+	if browseMode:
+		# Entering browse mode
+		if TouchMode.BROWSE not in availableTouchModes:
+			availableTouchModes.append(TouchMode.BROWSE)
+
+		handler._curTouchMode = TouchMode.BROWSE
+
+	else:
+		# Leaving browse mode
+		if TouchMode.BROWSE in availableTouchModes:
+			availableTouchModes.remove(TouchMode.BROWSE)
+
+		if handler._curTouchMode == TouchMode.BROWSE:
+			handler._curTouchMode = TouchMode.OBJECT
+
+
+class POINTER_INFO(Structure):
 	_fields_ = [
-		("pointerType", DWORD),  # noqa: F405
-		("pointerId", c_uint32),  # noqa: F405
-		("frameId", c_uint32),  # noqa: F405
-		("pointerFlags", c_uint32),  # noqa: F405
-		("sourceDevice", HANDLE),  # noqa: F405
-		("hwndTarget", HWND),  # noqa: F405
-		("ptPixelLocation", POINT),  # noqa: F405
-		("ptHimetricLocation", POINT),  # noqa: F405
-		("ptPixelLocationRaw", POINT),  # noqa: F405
-		("ptHimetricLocationRaw", POINT),  # noqa: F405
-		("dwTime", DWORD),  # noqa: F405
-		("historyCount", c_uint32),  # noqa: F405
-		("inputData", c_int),  # noqa: F405
-		("dwKeyStates", DWORD),  # noqa: F405
-		("PerformanceCount", c_uint64),  # noqa: F405
+		("pointerType", DWORD),
+		("pointerId", c_uint32),
+		("frameId", c_uint32),
+		("pointerFlags", c_uint32),
+		("sourceDevice", HANDLE),
+		("hwndTarget", HWND),
+		("ptPixelLocation", POINT),
+		("ptHimetricLocation", POINT),
+		("ptPixelLocationRaw", POINT),
+		("ptHimetricLocationRaw", POINT),
+		("dwTime", DWORD),
+		("historyCount", c_uint32),
+		("inputData", c_int),
+		("dwKeyStates", DWORD),
+		("PerformanceCount", c_uint64),
 	]
 
 
-class POINTER_TOUCH_INFO(Structure):  # noqa: F405
+class POINTER_TOUCH_INFO(Structure):
 	_fields_ = [
 		("pointerInfo", POINTER_INFO),
-		("touchFlags", c_uint32),  # noqa: F405
-		("touchMask", c_uint32),  # noqa: F405
-		("rcContact", RECT),  # noqa: F405
-		("rcContactRaw", RECT),  # noqa: F405
-		("orientation", c_uint32),  # noqa: F405
-		("pressure", c_uint32),  # noqa: F405
+		("touchFlags", c_uint32),
+		("touchMask", c_uint32),
+		("rcContact", RECT),
+		("rcContactRaw", RECT),
+		("orientation", c_uint32),
+		("pressure", c_uint32),
 	]
 
 
@@ -102,6 +196,109 @@ ANRUS_TOUCH_MODIFICATION_ACTIVE = 2
 
 touchWindow = None
 touchThread = None
+
+_LOGPIXELSX = 88
+"""Device capability index for horizontal screen DPI, used to convert mm to pixels."""
+
+
+def _getEdge(x: int, y: int) -> TouchEdge | None:
+	"""Determine if coordinates fall within an edge margin of the screen.
+
+	The margin width is defined in millimetres by :data:`touchTracker._EDGE_MARGIN_MM`
+	and converted to pixels using the screen DPI at call time.
+
+	All four edges are checked.
+	Note that Windows or the taskbar may intercept gestures on certain edges
+	before they reach NVDA, in which case this function will never be called for those touches.
+
+	:param x: The x screen coordinate to test.
+	:param y: The y screen coordinate to test.
+	:return: A :class:`touchTracker.TouchEdge` member,
+		or ``None`` if not near any tracked edge or edge gestures are disabled.
+	"""
+	if not config.conf["touch"]["edgeGestures"]:
+		return None
+	screenWidth = user32.GetSystemMetrics(SystemMetrics.CX_SCREEN)
+	screenHeight = user32.GetSystemMetrics(SystemMetrics.CY_SCREEN)
+	dc = user32.GetDC(0)
+	dpi = winBindings.gdi32.GetDeviceCaps(dc, _LOGPIXELSX) or 96
+	user32.ReleaseDC(0, dc)
+	margin = int(touchTracker._EDGE_MARGIN_MM / 25.4 * dpi)
+	if x <= margin:
+		return TouchEdge.LEFT
+	if x >= screenWidth - margin:
+		return TouchEdge.RIGHT
+	if y <= margin:
+		return TouchEdge.TOP
+	if y >= screenHeight - margin:
+		return TouchEdge.BOTTOM
+	return None
+
+
+_flickActions: frozenset[TouchAction] = frozenset(
+	{
+		TouchAction.FLICK_RIGHT,
+		TouchAction.FLICK_LEFT,
+		TouchAction.FLICK_UP,
+		TouchAction.FLICK_DOWN,
+	},
+)
+"""The set of single-direction flick actions that can begin a sequential flick gesture."""
+
+_flickSequenceMap: dict[
+	tuple[TouchAction, TouchAction],
+	TouchAction,
+] = {
+	(
+		TouchAction.FLICK_RIGHT,
+		TouchAction.FLICK_LEFT,
+	): TouchAction.FLICK_RIGHT_THEN_LEFT,
+	(
+		TouchAction.FLICK_LEFT,
+		TouchAction.FLICK_RIGHT,
+	): TouchAction.FLICK_LEFT_THEN_RIGHT,
+	(
+		TouchAction.FLICK_UP,
+		TouchAction.FLICK_DOWN,
+	): TouchAction.FLICK_UP_THEN_DOWN,
+	(
+		TouchAction.FLICK_DOWN,
+		TouchAction.FLICK_UP,
+	): TouchAction.FLICK_DOWN_THEN_UP,
+	(
+		TouchAction.FLICK_RIGHT,
+		TouchAction.FLICK_UP,
+	): TouchAction.FLICK_RIGHT_THEN_UP,
+	(
+		TouchAction.FLICK_RIGHT,
+		TouchAction.FLICK_DOWN,
+	): TouchAction.FLICK_RIGHT_THEN_DOWN,
+	(
+		TouchAction.FLICK_LEFT,
+		TouchAction.FLICK_UP,
+	): TouchAction.FLICK_LEFT_THEN_UP,
+	(
+		TouchAction.FLICK_LEFT,
+		TouchAction.FLICK_DOWN,
+	): TouchAction.FLICK_LEFT_THEN_DOWN,
+	(
+		TouchAction.FLICK_UP,
+		TouchAction.FLICK_RIGHT,
+	): TouchAction.FLICK_UP_THEN_RIGHT,
+	(
+		TouchAction.FLICK_UP,
+		TouchAction.FLICK_LEFT,
+	): TouchAction.FLICK_UP_THEN_LEFT,
+	(
+		TouchAction.FLICK_DOWN,
+		TouchAction.FLICK_RIGHT,
+	): TouchAction.FLICK_DOWN_THEN_RIGHT,
+	(
+		TouchAction.FLICK_DOWN,
+		TouchAction.FLICK_LEFT,
+	): TouchAction.FLICK_DOWN_THEN_LEFT,
+}
+"""Maps (firstFlickAction, secondFlickAction) to the corresponding sequential flick action."""
 
 
 class TouchInputGesture(inputCore.InputGesture):
@@ -115,7 +312,7 @@ class TouchInputGesture(inputCore.InputGesture):
 	* Hover: a finger is still touching the screen, and may be moving around. Only the most recent finger to be hovering causes these gestures.
 	* Hover up: a finger that was classed as a hover, releases contact with the screen.
 	All actions accept for Hover down, Hover and Hover up, can be made up of multiple fingers. It is possible to have things such as a 3-finger tap, or a 2-finger Tap and Hold, or a 4 finger Flick right.
-	Taps maybe pluralized (I.e. a tap very quickly followed by another tap of the same number of fingers will be represented by a double tap, rather than two separate taps). Currently double, tripple and quadruple plural taps are detected.
+	Taps maybe pluralized (I.e. a tap very quickly followed by another tap of the same number of fingers will be represented by a double tap, rather than two separate taps). Currently double, triple and quadruple plural taps are detected.
 	Tap and holds can be pluralized also (E.g. a double tap and hold means that there were two taps before the hold).
 	Actions also communicate if other fingers are currently held while performing the action. E.g. a hold+tap is when a finger touches the screen long enough to become a hover, and a tap with another finger is performed, while the first finger remains on the screen. Holds themselves also can be made of multiple fingers.
 	Based on all of this, gestures could be as complicated as a 5-finger hold + 5-finger quadruple tap and hold.
@@ -124,29 +321,29 @@ class TouchInputGesture(inputCore.InputGesture):
 	See touchHandler.MultitouchTracker for definitions of the available properties.
 	"""
 
-	counterNames = ["single", "double", "tripple", "quodruple"]
+	counterNames = ["single", "double", "triple", "quadruple"]  # noqa: RUF012
 
-	pluralActionLabels = {
+	pluralActionLabels = {  # noqa: RUF012
 		# Translators: a touch screen action performed once
 		"single": _("single {action}"),
 		# Translators: a touch screen action performed twice
 		"double": _("double {action}"),
 		# Translators: a touch screen action performed 3 times
-		"tripple": _("tripple {action}"),
+		"triple": _("triple {action}"),
 		# Translators: a touch screen action performed 4 times
-		"quodruple": _("quadruple {action}"),
+		"quadruple": _("quadruple {action}"),
 	}
 
 	def _get_speechEffectWhenExecuted(self):
-		if self.tracker.action in (touchTracker.action_hover, touchTracker.action_hoverUp):
+		if self.tracker.action in (TouchAction.HOVER, TouchAction.HOVER_UP):
 			return None
-		return super(TouchInputGesture, self).speechEffectWhenExecuted
+		return super().speechEffectWhenExecuted
 
 	def _get_reportInInputHelp(self):
-		return self.tracker.action != touchTracker.action_hover
+		return self.tracker.action != TouchAction.HOVER
 
 	def __init__(self, preheldTracker, tracker, mode):
-		super(TouchInputGesture, self).__init__()
+		super().__init__()
 		self.tracker = tracker
 		self.preheldTracker = preheldTracker
 		self.mode = mode
@@ -158,15 +355,18 @@ class TouchInputGesture(inputCore.InputGesture):
 		for includeHeldFingers in [True, False] if self.preheldTracker else [False]:
 			ID = ""
 			if self.preheldTracker:
-				ID += ("%dfinger_hold+" % self.preheldTracker.numFingers) if includeHeldFingers else "hold+"
+				ID += ("%dfinger_hold+" % self.preheldTracker.numFingers) if includeHeldFingers else "hold+"  # noqa: UP031
 			if self.tracker.numFingers > 1:
-				ID += "%dfinger_" % self.tracker.numFingers
+				ID += "%dfinger_" % self.tracker.numFingers  # noqa: UP031
 			if self.tracker.actionCount > 1:
-				ID += "%s_" % self.counterNames[min(self.tracker.actionCount, 4) - 1]
+				ID += "%s_" % self.counterNames[min(self.tracker.actionCount, 4) - 1]  # noqa: UP031
+			edge = _getEdge(self.tracker.x, self.tracker.y)
+			if edge:
+				ID += edge + "_"
 			ID += self.tracker.action
 			# "ts" is the gesture identifier source prefix for "touch screen".
-			IDs.append("ts(%s):%s" % (self.mode, ID))
-			IDs.append("ts:%s" % ID)
+			IDs.append("ts(%s):%s" % (self.mode, ID))  # noqa: UP031
+			IDs.append("ts:%s" % ID)  # noqa: UP031
 		return IDs
 
 	RE_IDENTIFIER = re.compile(r"^ts(?:\((.+?)\))?:(.*)$")
@@ -180,7 +380,7 @@ class TouchInputGesture(inputCore.InputGesture):
 			foundAction = foundPlural = False
 			for subID in reversed(ID.split("_")):
 				if not foundAction:
-					action = touchTracker.actionLabels[subID]
+					action = TouchAction(subID).displayString
 					foundAction = True
 					continue
 				if not foundPlural:
@@ -189,6 +389,14 @@ class TouchInputGesture(inputCore.InputGesture):
 						action = pluralActionLabel.format(action=action)
 						foundPlural = True
 						continue
+				try:
+					edgeLabel = TouchEdge(subID).displayString
+					# Translators: a touch screen action that started from a screen edge,
+					# e.g. "left edge flick right"
+					action = _("{edgeLabel} {action}").format(edgeLabel=edgeLabel, action=action)
+					continue
+				except ValueError:
+					pass
 				if subID.endswith("finger"):
 					numFingers = int(subID[: 0 - len("finger")])
 					if numFingers > 1:
@@ -203,14 +411,18 @@ class TouchInputGesture(inputCore.InputGesture):
 		# Translators: a touch screen gesture
 		source = _("Touch screen")
 		if mode:
-			source = "{source}, {mode}".format(source=source, mode=touchModeLabels[mode])
+			try:
+				modeLabel = TouchMode(mode).displayString
+			except ValueError:
+				modeLabel = mode
+			source = f"{source}, {modeLabel}"
 		return source, " + ".join(actions)
 
 	def _get__immediate(self):
 		# Because touch may produce a hover gesture for every pump, an immediate pump
 		# can result in exhaustion of the window message queue. Thus, don't do
 		# immediate pumps for hover gestures.
-		return not self.tracker.action == touchTracker.action_hover
+		return not self.tracker.action == TouchAction.HOVER  # noqa: SIM201
 
 
 inputCore.registerGestureSource("ts", TouchInputGesture)
@@ -220,7 +432,7 @@ class TouchHandler(threading.Thread):
 	def __init__(self):
 		self.pendingEmitsTimer = gui.NonReEntrantTimer(core.requestPump)
 		super().__init__(name=f"{self.__class__.__module__}.{self.__class__.__qualname__}")
-		self._curTouchMode = "object"
+		self._curTouchMode = TouchMode.OBJECT
 		self.initializedEvent = threading.Event()
 		self.threadExc = None
 		self.start()
@@ -229,24 +441,24 @@ class TouchHandler(threading.Thread):
 			raise self.threadExc
 
 	def terminate(self):
-		windll.user32.PostThreadMessageW(self.ident, WM_QUIT, 0, 0)
+		user32.PostThreadMessage(self.ident, WM_QUIT, 0, 0)
 		self.join()
 		self.pendingEmitsTimer.Stop()
 
 	def run(self):
 		try:
-			self._appInstance = windll.kernel32.GetModuleHandleW(None)
-			self._cInputTouchWindowProc = winUser.WNDPROC(self.inputTouchWndProc)
-			self._wc = winUser.WNDCLASSEXW(
-				cbSize=sizeof(winUser.WNDCLASSEXW),  # noqa: F405
+			self._appInstance = winBindings.kernel32.GetModuleHandle(None)
+			self._cInputTouchWindowProc = user32.WNDPROC(self.inputTouchWndProc)
+			self._wc = user32.WNDCLASSEXW(
+				cbSize=sizeof(user32.WNDCLASSEXW),
 				lpfnWndProc=self._cInputTouchWindowProc,
 				hInstance=self._appInstance,
 				lpszClassName="inputTouchWindowClass",
-			)  # noqa: F405
-			self._wca = windll.user32.RegisterClassExW(byref(self._wc))  # noqa: F405
-			self._touchWindow = windll.user32.CreateWindowExW(
+			)
+			self._wca = user32.RegisterClassEx(byref(self._wc))
+			self._touchWindow = user32.CreateWindowEx(
 				0,
-				self._wca,
+				cast(self._wca, LPCWSTR),
 				"NVDA touch input",
 				0,
 				0,
@@ -258,27 +470,28 @@ class TouchHandler(threading.Thread):
 				self._appInstance,
 				None,
 			)
-			windll.user32.RegisterPointerInputTarget(self._touchWindow, PT_TOUCH)
-			oledll.oleacc.AccSetRunningUtilityState(  # noqa: F405
+			user32.RegisterPointerInputTarget(self._touchWindow, PT_TOUCH)
+			winBindings.oleacc.AccSetRunningUtilityState(
 				self._touchWindow,
 				ANRUS_TOUCH_MODIFICATION_ACTIVE,
 				ANRUS_TOUCH_MODIFICATION_ACTIVE,
-			)  # noqa: F405
+			)
 			self.trackerManager = touchTracker.TrackerManager()
 			self.screenExplorer = screenExplorer.ScreenExplorer()
 			self.screenExplorer.updateReview = True
-		except Exception as e:
+		except Exception as e:  # noqa: BLE001
 			self.threadExc = e
 		finally:
 			self.initializedEvent.set()
-		msg = MSG()  # noqa: F405
-		while windll.user32.GetMessageW(byref(msg), None, 0, 0):  # noqa: F405
-			windll.user32.TranslateMessage(byref(msg))  # noqa: F405
-			windll.user32.DispatchMessageW(byref(msg))  # noqa: F405
-		oledll.oleacc.AccSetRunningUtilityState(self._touchWindow, ANRUS_TOUCH_MODIFICATION_ACTIVE, 0)  # noqa: F405
-		windll.user32.UnregisterPointerInputTarget(self._touchWindow, PT_TOUCH)
-		windll.user32.DestroyWindow(self._touchWindow)
-		windll.user32.UnregisterClassW(self._wca, self._appInstance)
+		msg = MSG()
+		while user32.GetMessage(byref(msg), None, 0, 0):
+			user32.TranslateMessage(byref(msg))
+			user32.DispatchMessage(byref(msg))
+		winBindings.oleacc.AccSetRunningUtilityState(self._touchWindow, ANRUS_TOUCH_MODIFICATION_ACTIVE, 0)
+		user32.UnregisterPointerInputTarget(self._touchWindow, PT_TOUCH)
+		user32.DestroyWindow(self._touchWindow)
+		# The class atom should be stored as the low word of the class name string pointer.
+		user32.UnregisterClass(cast(c_void_p(self._wca), LPCWSTR), self._appInstance)
 
 	def inputTouchWndProc(self, hwnd, msg, wParam, lParam):
 		if msg >= _WM_POINTER_FIRST and msg <= _WM_POINTER_LAST:
@@ -294,20 +507,80 @@ class TouchHandler(threading.Thread):
 				self.trackerManager.update(ID, x, y, True)
 				core.requestPump()
 			return 0
-		return windll.user32.DefWindowProcW(hwnd, msg, wParam, lParam)
+		return user32.DefWindowProc(hwnd, msg, wParam, lParam)
 
-	def setMode(self, mode):
+	def setMode(self, mode: TouchMode | str) -> None:
 		if mode not in availableTouchModes:
-			raise ValueError("Unknown mode %s" % mode)
+			raise ValueError("Unknown mode %s" % mode)  # noqa: UP031
 		self._curTouchMode = mode
 
-	def pump(self):
+	def _executeGesture(self, gesture: "TouchInputGesture") -> None:
+		"""Execute a touch gesture, silently ignoring unbound gestures.
+
+		:param gesture: The gesture to execute.
+		"""
+		try:
+			inputCore.manager.executeGesture(gesture)
+		except inputCore.NoInputGestureAction:
+			pass
+
+	def _tryBuildSequentialGesture(
+		self,
+		first: "TouchInputGesture",
+		second: "TouchInputGesture",
+	) -> "TouchInputGesture | None":
+		"""Attempt to combine two consecutive flick gestures into a single sequential flick gesture.
+
+		:param first: The first flick gesture.
+		:param second: The second flick gesture.
+		:return: A combined sequential gesture, or ``None`` if the pair is not a recognised combination.
+		"""
+		if first.tracker.numFingers != second.tracker.numFingers:
+			return None
+		compoundAction = _flickSequenceMap.get((first.tracker.action, second.tracker.action))
+		if compoundAction is None:
+			return None
+		compoundTracker = touchTracker.MultiTouchTracker(
+			compoundAction,
+			first.tracker.x,
+			first.tracker.y,
+			first.tracker.startTime,
+			second.tracker.endTime,
+			numFingers=second.tracker.numFingers,
+		)
+		return TouchInputGesture(first.preheldTracker, compoundTracker, first.mode)
+
+	def _processGestures(self) -> None:
+		"""Emit all pending touch trackers as gestures, combining consecutive flicks into sequential gestures."""
+		# pendingFlick holds the first flick within this cycle, waiting to see if a second follows.
+		# This is a local variable — no timer, no cross-pump buffering, so normal flicks fire immediately.
+		pendingFlick: TouchInputGesture | None = None
 		for preheldTracker, tracker in self.trackerManager.emitTrackers():
-			gesture = TouchInputGesture(preheldTracker, tracker, self._curTouchMode)
-			try:
-				inputCore.manager.executeGesture(gesture)
-			except inputCore.NoInputGestureAction:
-				pass
+			modeStr = (
+				self._curTouchMode.value if isinstance(self._curTouchMode, TouchMode) else self._curTouchMode
+			)
+			gesture = TouchInputGesture(preheldTracker, tracker, modeStr)
+			if tracker.action in _flickActions:
+				if pendingFlick is not None:
+					sequentialGesture = self._tryBuildSequentialGesture(pendingFlick, gesture)
+					if sequentialGesture is not None:
+						pendingFlick = None
+						self._executeGesture(sequentialGesture)
+						continue
+				# No match yet: flush any earlier flick, then hold this one for the rest of this cycle.
+				if pendingFlick is not None:
+					self._executeGesture(pendingFlick)
+				pendingFlick = gesture
+			else:
+				if pendingFlick is not None:
+					self._executeGesture(pendingFlick)
+					pendingFlick = None
+				self._executeGesture(gesture)
+		if pendingFlick is not None:
+			self._executeGesture(pendingFlick)
+
+	def pump(self):
+		self._processGestures()
 		interval = self.trackerManager.pendingEmitInterval
 		if interval and interval > 0:
 			# Ensure we are pumped again by the time more pending multiTouch trackers are ready
@@ -322,9 +595,9 @@ class TouchHandler(threading.Thread):
 		@param obj: The NVDAObject with which the user is interacting.
 		@type obj: L{NVDAObjects.NVDAObject}
 		"""
-		oledll.oleacc.AccNotifyTouchInteraction(  # noqa: F405
+		winBindings.oleacc.AccNotifyTouchInteraction(
 			gui.mainFrame.Handle,
-			obj.windowHandle,  # noqa: F405
+			obj.windowHandle,
 			obj.location.center.toPOINT(),
 		)
 
@@ -340,7 +613,7 @@ def touchSupported(debugLog: bool = False) -> bool:
 		if debugLog:
 			log.debugWarning("Touch only supported on installed copies")
 		return False
-	maxTouches = windll.user32.GetSystemMetrics(SM_MAXIMUMTOUCHES)
+	maxTouches = user32.GetSystemMetrics(SystemMetrics.MAXIMUM_TOUCHES)
 	if maxTouches <= 0:
 		if debugLog:
 			log.debugWarning("No touch devices found")
@@ -370,19 +643,22 @@ def handlePostConfigProfileSwitch():
 
 
 def initialize():
-	global handler
+	global handler  # noqa: PLW0602
 	if not touchSupported(debugLog=True):
 		raise NotImplementedError
 	log.debug(
-		"Touchscreen detected, maximum touch inputs: %d" % winUser.user32.GetSystemMetrics(SM_MAXIMUMTOUCHES),
+		"Touchscreen detected, maximum touch inputs: %d"  # noqa: UP031
+		% user32.GetSystemMetrics(SystemMetrics.MAXIMUM_TOUCHES),
 	)
 	config.post_configProfileSwitch.register(handlePostConfigProfileSwitch)
+	post_browseModeStateChange.register(_browseModeStateChange)
 	setTouchSupport(config.conf["touch"]["enabled"])
 
 
 def terminate():
 	global handler
 	config.post_configProfileSwitch.unregister(handlePostConfigProfileSwitch)
+	post_browseModeStateChange.unregister(_browseModeStateChange)
 	if handler:
 		handler.terminate()
 		handler = None

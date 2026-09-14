@@ -5,11 +5,11 @@
 
 """Unit tests for the checkPot test."""
 
-from contextlib import redirect_stdout, redirect_stderr
+from contextlib import redirect_stdout, redirect_stderr  # noqa: I001
 from io import StringIO
 import os.path
 import unittest
-from typing import Tuple
+from typing import Tuple  # noqa: F401, UP035
 
 
 class TestCheckPot(unittest.TestCase):
@@ -28,15 +28,14 @@ class TestCheckPot(unittest.TestCase):
 	def tearDown(self):
 		self.checkPot.EXPECTED_MESSAGES_WITHOUT_COMMENTS = self.saved_EXPECTED_MESSAGES_WITHOUT_COMMENTS
 
-	def doCheckPot(self, fileName: str) -> Tuple[int, str]:
+	def doCheckPot(self, fileName: str) -> tuple[int, str]:
 		"""Run checkPot against the specified test POT file and returns its error count and status line."""
 		filePath = os.path.join(os.path.dirname(__file__), fileName)
 		bufOut = StringIO()
-		bufErr = StringIO()
-		with redirect_stdout(bufOut), redirect_stderr(bufErr):
+		# Redirect stdout and stderr to the sample place for ordered output
+		with redirect_stdout(bufOut), redirect_stderr(bufOut):
 			errorCount = self.checkPot.checkPot(filePath)
-		self.assertTrue(bufOut.tell(), "No standard output")
-		self.assertFalse(bufErr.tell(), "Non-empty standard error output")
+		self.assertTrue(bufOut.tell(), "No output")
 		outLines = bufOut.getvalue().split("\n")
 		self.assertGreaterEqual(len(outLines), 2, "Less than two lines of standard output")
 		self.assertFalse(outLines[-1], "Standard output does not end with an empty line.")

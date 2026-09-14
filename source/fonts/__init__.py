@@ -2,14 +2,15 @@
 # Copyright (C) 2019 NV Access Limited
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-from typing import List
-
+from typing import List  # noqa: F401, I001, UP035
 import globalVars
 from logHandler import log
 import os
-from ctypes import WinDLL
 
-gdi32 = WinDLL("gdi32.dll")
+import winBindings.gdi32
+from utils import _deprecate
+
+
 """
 Loads custom fonts for use in NVDA.
 """
@@ -18,10 +19,10 @@ fontsDir = os.path.join(globalVars.appDir, "fonts")
 
 
 def _isSupportedFontPath(f: str) -> bool:
-	return os.path.isfile(f) and (f.endswith(".otf") or f.endswith(".ttf"))
+	return os.path.isfile(f) and (f.endswith(".otf") or f.endswith(".ttf"))  # noqa: PIE810
 
 
-def addFonts(_fontSearchPath) -> List[str]:
+def addFonts(_fontSearchPath) -> list[str]:
 	searchPathFiles = [os.path.join(_fontSearchPath, f) for f in os.listdir(_fontSearchPath)]
 	fonts = [f for f in searchPathFiles if _isSupportedFontPath(f)]
 	log.debug(f"Fonts to load: {fonts}")
@@ -39,7 +40,7 @@ def addFonts(_fontSearchPath) -> List[str]:
 def _addFontResource(fontPath: str) -> int:
 	# from wingdi.h
 	FR_PRIVATE = 0x10
-	res = gdi32.AddFontResourceExW(
+	res = winBindings.gdi32.AddFontResourceEx(
 		fontPath,
 		# Only this process can use the font.
 		# The system will take care of unloading the font when the process ends.
@@ -51,7 +52,7 @@ def _addFontResource(fontPath: str) -> int:
 
 
 # Fonts that have been loaded.
-_imported: List[str] = []
+_imported: list[str] = []
 
 
 def importFonts():
@@ -62,3 +63,8 @@ def importFonts():
 
 	log.debug("Loading fonts.")
 	_imported = addFonts(fontsDir)
+
+
+__getattr__ = _deprecate.handleDeprecations(
+	_deprecate.MovedSymbol("gdi32", "winBindings.gdi32", "dll"),
+)

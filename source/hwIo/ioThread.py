@@ -1,10 +1,10 @@
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2016-2023 NV Access Limited, Joseph Lee, Babbage B.V., Davy Kager, Bram Duvigneau,
+# Copyright (C) 2016-2025 NV Access Limited, Joseph Lee, Babbage B.V., Davy Kager, Bram Duvigneau,
 # Leonard de Ruijter
 
-import ctypes
+import ctypes  # noqa: I001
 import ctypes.wintypes
 import threading
 import winKernel
@@ -14,35 +14,36 @@ from serial.win32 import OVERLAPPED, LPOVERLAPPED
 from extensionPoints.util import AnnotatableWeakref, BoundMethodWeakref
 from inspect import ismethod
 from logHandler import getFormattedStacksForAllThreads
+import winBindings.kernel32
+from utils import _deprecate
 
 
-LPOVERLAPPED_COMPLETION_ROUTINE = ctypes.WINFUNCTYPE(
-	None,
-	ctypes.wintypes.DWORD,
-	ctypes.wintypes.DWORD,
-	LPOVERLAPPED,
+__getattr__ = _deprecate.handleDeprecations(
+	_deprecate.MovedSymbol("LPOVERLAPPED_COMPLETION_ROUTINE", "winBindings.kernel32"),
 )
+
+
 ApcT = typing.Callable[[int], None]
 ApcIdT = int
 OverlappedStructAddressT = int
 CompletionRoutineT = typing.Callable[[int, int, LPOVERLAPPED], None]
-ApcStoreT = typing.Dict[
+ApcStoreT = dict[
 	ApcIdT,
-	typing.Tuple[
-		typing.Union[ApcT, BoundMethodWeakref[ApcT], AnnotatableWeakref[ApcT]],
+	tuple[
+		ApcT | BoundMethodWeakref[ApcT] | AnnotatableWeakref[ApcT],
 		ApcIdT,
 	],
 ]
-CompletionRoutineStoreTypeT = typing.Dict[
+CompletionRoutineStoreTypeT = dict[
 	OverlappedStructAddressT,
-	typing.Tuple[
-		typing.Union[BoundMethodWeakref[CompletionRoutineT], AnnotatableWeakref[CompletionRoutineT]],
+	tuple[
+		BoundMethodWeakref[CompletionRoutineT] | AnnotatableWeakref[CompletionRoutineT],
 		OVERLAPPED,
 	],
 ]
 
 
-def _generateApcParams() -> typing.Generator[ApcIdT, None, None]:
+def _generateApcParams() -> typing.Generator[ApcIdT]:
 	"""Generator of APC params for internal use.
 	Params generated using this generator are passed to our internal APC to lookup Python functions.
 	A parameter passed to an APC is of type ULONG_PTR, which has a size of 4 bytes.
@@ -50,7 +51,7 @@ def _generateApcParams() -> typing.Generator[ApcIdT, None, None]:
 	wraps back to 0 and continues cycling.
 	"""
 	while True:
-		for param in range(0x100000000):
+		for param in range(0x100000000):  # noqa: UP028
 			yield param
 
 
@@ -62,7 +63,7 @@ class IoThread(threading.Thread):
 	#: Store of Python functions to be called as APC.
 	#: This allows us to have a single APC function in the class rather than on
 	#: each instance, which prevents reference cycles.
-	_apcStore: ApcStoreT = {}
+	_apcStore: ApcStoreT = {}  # noqa: RUF012
 	#: Store of Python functions to be called as Overlapped Completion Routine.
 	#: This allows us to have a single completion routine in the class rather than on
 	#: each instance, which prevents reference cycles.
@@ -70,7 +71,7 @@ class IoThread(threading.Thread):
 	#: eventhough the structure is also stored in the value.
 	#: The OVERLAPPED structure can't be used as key because ctypes does not have OOR (original object return),
 	#: it constructs a new, equivalent object each time you retrieve the contents of a LPOVERLAPPED.
-	_completionRoutineStore: CompletionRoutineStoreTypeT = {}
+	_completionRoutineStore: CompletionRoutineStoreTypeT = {}  # noqa: RUF012
 
 	def __init__(self):
 		super().__init__(
@@ -78,7 +79,7 @@ class IoThread(threading.Thread):
 			daemon=True,
 		)
 
-	@winKernel.PAPCFUNC
+	@winBindings.kernel32.PAPCFUNC
 	def _internalApc(param: ApcIdT):
 		threadinst = threading.current_thread()
 		if not isinstance(threadinst, IoThread):
@@ -102,12 +103,12 @@ class IoThread(threading.Thread):
 		try:
 			function(actualParam)
 		except Exception:
-			log.error(
+			log.error(  # noqa: G201
 				f"Error in APC function {function!r} with apcId {param} queued to IoThread",
 				exc_info=True,
 			)
 
-	@LPOVERLAPPED_COMPLETION_ROUTINE
+	@winBindings.kernel32.LPOVERLAPPED_COMPLETION_ROUTINE
 	def _internalCompletionRoutine(
 		error: int,
 		numberOfBytes: int,
@@ -119,7 +120,7 @@ class IoThread(threading.Thread):
 			return
 
 		ptr = ctypes.cast(overlapped, ctypes.c_void_p).value
-		(reference, cachedOverlapped) = IoThread._completionRoutineStore.pop(ptr, (None, None))
+		(reference, cachedOverlapped) = IoThread._completionRoutineStore.pop(ptr, (None, None))  # noqa: RUF059
 		if reference is None:
 			log.error(
 				f"Internal completion routine called with pointer 0x{ptr:x}, but no such address in store",
@@ -136,11 +137,11 @@ class IoThread(threading.Thread):
 		try:
 			function(error, numberOfBytes, overlapped)
 		except Exception:
-			log.error(f"Error in overlapped completion routine {function!r}", exc_info=True)
+			log.error(f"Error in overlapped completion routine {function!r}", exc_info=True)  # noqa: G201
 
 	def start(self):
 		super().start()
-		self.handle = ctypes.windll.kernel32.OpenThread(winKernel.THREAD_SET_CONTEXT, False, self.ident)
+		self.handle = winBindings.kernel32.OpenThread(winKernel.THREAD_SET_CONTEXT, False, self.ident)
 
 	def _registerToCallAsApc(
 		self,
@@ -183,11 +184,11 @@ class IoThread(threading.Thread):
 		@param param: The parameter passed to the APC when called.
 		"""
 		internalParam = self._registerToCallAsApc(func, param)
-		ctypes.windll.kernel32.QueueUserAPC(self._internalApc, self.handle, internalParam)
+		winBindings.kernel32.QueueUserAPC(self._internalApc, self.handle, internalParam)
 
 	def setWaitableTimer(
 		self,
-		handle: typing.Union[int, ctypes.wintypes.HANDLE],
+		handle: int | ctypes.wintypes.HANDLE,
 		dueTime: int,
 		func: ApcT,
 		param: int = 0,
@@ -206,7 +207,7 @@ class IoThread(threading.Thread):
 		winKernel.setWaitableTimer(
 			handle,
 			dueTime,
-			completionRoutine=self._internalApc,
+			completionRoutine=ctypes.cast(self._internalApc, winBindings.kernel32.PTIMERAPCROUTINE),
 			arg=internalParam,
 		)
 
@@ -241,7 +242,7 @@ class IoThread(threading.Thread):
 		self._completionRoutineStore[addr] = (reference, overlapped)
 		return self._internalCompletionRoutine
 
-	def stop(self, timeout: typing.Optional[float] = None):
+	def stop(self, timeout: float | None = None):
 		if not self.is_alive():
 			raise RuntimeError("Thread is not running")
 		self.exit = True
@@ -261,7 +262,7 @@ class IoThread(threading.Thread):
 	def run(self):
 		try:
 			while True:
-				ctypes.windll.kernel32.SleepEx(winKernel.INFINITE, True)
+				winBindings.kernel32.SleepEx(winKernel.INFINITE, True)
 				if self.exit:
 					break
 		except Exception:

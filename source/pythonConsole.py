@@ -1,37 +1,36 @@
-# pythonConsole.py
 # A part of NonVisual Desktop Access (NVDA)
 # This file is covered by the GNU General Public License.
 # See the file COPYING for more details.
-# Copyright (C) 2008-2024 NV Access Limited, Leonard de Ruijter, Julien Cochuyt, Cyrille Bougot
-
-import watchdog
+# Copyright (C) 2008-2025 NV Access Limited, Leonard de Ruijter, Julien Cochuyt, Cyrille Bougot
 
 """Provides an interactive Python console which can be run from within NVDA.
 To use, call L{initialize} to create a singleton instance of the console GUI. This can then be accessed externally as L{consoleUI}.
 """
 
-import builtins  # noqa: E402
-import os  # noqa: E402
-from typing import Sequence  # noqa: E402
-import code  # noqa: E402
-import codeop  # noqa: E402
-import sys  # noqa: E402
-import pydoc  # noqa: E402
-import re  # noqa: E402
-import itertools  # noqa: E402
-import rlcompleter  # noqa: E402
-import wx  # noqa: E402
-from baseObject import AutoPropertyObject  # noqa: E402
-import speech  # noqa: E402
-import queueHandler  # noqa: E402
-import api  # noqa: E402
-import gui  # noqa: E402
-from logHandler import log  # noqa: E402
-import braille  # noqa: E402
-import gui.contextHelp  # noqa: E402
+import watchdog  # noqa: I001
+import builtins
+import os
+from collections.abc import Sequence
+import code
+import codeop
+import sys
+import pydoc
+import re
+import itertools
+import rlcompleter
+import wx
+from baseObject import AutoPropertyObject
+import speech
+import queueHandler
+import api
+import gui
+from logHandler import log
+import braille
+import gui.contextHelp
+import textInfos
 
 
-class HelpCommand(object):
+class HelpCommand:
 	"""
 	Emulation of the 'help' command found in the Python interactive shell.
 	"""
@@ -45,7 +44,7 @@ class HelpCommand(object):
 		return pydoc.help(*args, **kwargs)
 
 
-class ExitConsoleCommand(object):
+class ExitConsoleCommand:
 	"""
 	An object that can be used as an exit command that can close the console or print a friendly message for its repr.
 	"""
@@ -74,15 +73,13 @@ class Completer(rlcompleter.Completer):
 		This causes serious issues for baseObject.Getter descriptors
 		when a getter raises NotImplementedError, for example (#15872).
 		"""
-		import re
-
 		m = re.match(r"(\w+(\.\w+)*)\.(\w*)", text)
 		if not m:
 			return []
 		expr, attr = m.group(1, 3)
 		try:
 			thisobject = eval(expr, self.namespace)
-		except Exception:
+		except Exception:  # noqa: BLE001
 			return []
 
 		# get the content of the object, except __builtins__
@@ -106,7 +103,7 @@ class Completer(rlcompleter.Completer):
 					match = f"{expr}.{word}"
 					try:
 						val = getattr(thisobject, word)
-					except Exception:
+					except Exception:  # noqa: BLE001, S110
 						pass  # Include even if attribute not set
 					else:
 						match = self._callable_postfix(val, match)
@@ -186,7 +183,7 @@ class PythonConsole(code.InteractiveConsole, AutoPropertyObject):
 
 	def push(self, line):
 		if self._echo:
-			self._echo("%s %s\n" % (self.prompt, line))
+			self._echo("%s %s\n" % (self.prompt, line))  # noqa: UP031
 		# Capture stdout/stderr output as well as code interaction.
 		stdout, stderr = sys.stdout, sys.stderr
 		sys.stdout = sys.stderr = self
@@ -204,10 +201,10 @@ class PythonConsole(code.InteractiveConsole, AutoPropertyObject):
 		self.prompt = "..." if more else ">>>"
 		return more
 
-	def showsyntaxerror(self, filename=None):
+	def showsyntaxerror(self, filename: str | None = None, **kwargs):
 		excepthook = sys.excepthook
 		sys.excepthook = sys.__excepthook__
-		super().showsyntaxerror(filename=filename)
+		super().showsyntaxerror(filename=filename, **kwargs)
 		sys.excepthook = excepthook
 
 	def showtraceback(self):
@@ -223,7 +220,6 @@ class PythonConsole(code.InteractiveConsole, AutoPropertyObject):
 		import config
 		import controlTypes
 		import globalPlugins
-		import textInfos
 		import vision
 
 		self.namespace.clear()
@@ -255,25 +251,35 @@ class PythonConsole(code.InteractiveConsole, AutoPropertyObject):
 		Typically, used before the NVDA python console is opened, after which, calls
 		to the 'api' module will refer to this new focus.
 		"""
-		try:
-			caretPos = api.getCaretPosition()
-		except RuntimeError:
-			log.debug("Unable to set caretPos snapshot variable for python console.")
-			caretPos = None
 
-		self._namespaceSnapshotVars = {
-			"focus": api.getFocusObject(),
+		def _getCaretPos() -> textInfos.TextInfo | None:
+			try:
+				return api.getCaretPosition()
+			except RuntimeError:
+				log.debug("Unable to set caretPos snapshot variable for python console.")
+				return None
+
+		self._namespaceSnapshotVarsGetters = {
+			"focus": api.getFocusObject,
 			# Copy the focus ancestor list, as it gets mutated once it is replaced in api.setFocusObject.
-			"focusAnc": list(api.getFocusAncestors()),
-			"fdl": api.getFocusDifferenceLevel(),
-			"fg": api.getForegroundObject(),
-			"nav": api.getNavigatorObject(),
-			"caretObj": api.getCaretObject(),
-			"caretPos": caretPos,
-			"review": api.getReviewPosition(),
-			"mouse": api.getMouseObject(),
-			"brlRegions": braille.handler.buffer.regions,
+			"focusAnc": (lambda: list(api.getFocusAncestors())),
+			"fdl": api.getFocusDifferenceLevel,
+			"fg": api.getForegroundObject,
+			"nav": api.getNavigatorObject,
+			"caretObj": api.getCaretObject,
+			"caretPos": _getCaretPos,
+			"review": api.getReviewPosition,
+			"mouse": api.getMouseObject,
+			"brlRegions": (lambda: braille.handler.buffer.regions),
 		}
+		self._namespaceSnapshotVars = {}
+		for name, getter in self._namespaceSnapshotVarsGetters.items():
+			try:
+				value = getter()
+			except Exception:
+				log.error(f"Unable to set {name} snapshot variable for python console.", exc_info=True)  # noqa: G201
+				value = None
+			self._namespaceSnapshotVars[name] = value
 		self.namespace.update(self._namespaceSnapshotVars)
 
 	def removeNamespaceSnapshotVars(self):
@@ -572,7 +578,7 @@ def activate():
 	This shows the GUI and brings it to the foreground if possible.
 	@precondition: L{initialize} has been called.
 	"""
-	global consoleUI
+	global consoleUI  # noqa: PLW0602
 	consoleUI.Raise()
 	# There is a MAXIMIZE style which can be used on the frame at construction, but it doesn't seem to work the first time it is shown,
 	# probably because it was in the background.

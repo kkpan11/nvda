@@ -1,11 +1,12 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2024 NV Access Limited, Babbage B.V., Davy Kager, Bill Dengler, Julien Cochuyt,
+# Copyright (C) 2006-2026 NV Access Limited, Babbage B.V., Davy Kager, Bill Dengler, Julien Cochuyt,
 # Joseph Lee, Dawid Pieper, mltony, Bram Duvigneau, Cyrille Bougot, Rob Meredith,
-# Burman's Computer and Education Ltd., Leonard de Ruijter, Łukasz Golonka
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
+# Burman's Computer and Education Ltd., Leonard de Ruijter, Łukasz Golonka, Cary-rowen,
+# Wang Chong, Kefas Lungu
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
-from io import StringIO
+from io import StringIO  # noqa: I001
 from configobj import ConfigObj
 from . import configDefaults
 
@@ -13,7 +14,7 @@ from . import configDefaults
 #: provide an upgrade step (@see profileUpgradeSteps.py). An upgrade step does not need to be added when
 #: just adding a new element to (or removing from) the schema, only when old versions of the config
 #: (conforming to old schema versions) will not work correctly with the new schema.
-latestSchemaVersion = 13
+latestSchemaVersion = 25
 
 #: The configuration specification string
 #: @type: String
@@ -24,9 +25,10 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	saveConfigurationOnExit = boolean(default=True)
 	askToExit = boolean(default=true)
 	playStartAndExitSounds = boolean(default=true)
-	#possible log levels are DEBUG, IO, DEBUGWARNING, INFO
+	# possible log levels are DEBUG_UNREDACTED, DEBUG, IO, DEBUGWARNING, INFO and OFF
 	loggingLevel = string(default="INFO")
 	showWelcomeDialogAtStartup = boolean(default=true)
+	preventDisplayTurningOff = boolean(default=true)
 
 # Speech settings
 [speech]
@@ -35,17 +37,20 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	# symbolLevel: One of the characterProcessing.SymbolLevel values.
 	symbolLevel = integer(default=100)
 	trustVoiceLanguage = boolean(default=true)
-	unicodeNormalization = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="disabled")
+	unicodeNormalization = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
 	reportNormalizedForCharacterNavigation = boolean(default=true)
-	# Deprecated in 2025.1
-	includeCLDR = boolean(default=True)
 	symbolDictionaries = string_list(default=list("cldr"))
+	speechDictionaries = string_list(default=list("default", "voice"))
 	beepSpeechModePitch = integer(default=10000,min=50,max=11025)
-	outputDevice = string(default=default)
 	autoLanguageSwitching = boolean(default=true)
 	autoDialectSwitching = boolean(default=false)
+	reportLanguage = boolean(default=false)
+	reportNotSupportedLanguage = option("speech", "beep", "off", default="speech")
 	delayedCharacterDescriptions = boolean(default=false)
 	excludedSpeechModes = int_list(default=list())
+	trimLeadingSilence = boolean(default=true)
+	useWASAPIForSAPI4 = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
+	sayAllReadingUnit = featureFlag(optionsEnum="SayAllReadingUnitFlag", behaviorOfDefault="sentence")
 
 	[[__many__]]
 		capPitchChange = integer(default=30,min=-100,max=100)
@@ -55,8 +60,8 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 
 # Audio settings
 [audio]
+	outputDevice = string(default=default)
 	audioDuckingMode = integer(default=0)
-	WASAPI = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
 	soundVolumeFollowsVoice = boolean(default=false)
 	soundVolume = integer(default=100, min=0, max=100)
 	audioAwakeTime = integer(default=30, min=0, max=3600)
@@ -68,8 +73,8 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 [braille]
 	display = string(default=auto)
 	mode = option("followCursors", "speechOutput", default="followCursors")
-	translationTable = string(default=en-ueb-g1.ctb)
-	inputTable = string(default=en-ueb-g1.ctb)
+	translationTable = string(default=auto)
+	inputTable = string(default=auto)
 	expandAtCursor = boolean(default=true)
 	showCursor = boolean(default=true)
 	cursorBlink = boolean(default=true)
@@ -81,21 +86,27 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	showMessages = integer(0, 2, default=1)
 	# Timeout after the message will disappear from braille display
 	messageTimeout = integer(default=4, min=1, max=20)
+	# Rate for automatic scroll (cells/sec)
+	autoScrollRate = float(default=10, min=1, max=20)
 	tetherTo = option("auto", "focus", "review", default="auto")
 	reviewRoutingMovesSystemCaret = featureFlag(\
 		optionsEnum="ReviewRoutingMovesSystemCaretFlag", behaviorOfDefault="NEVER")
 	readByParagraph = boolean(default=false)
 	paragraphStartMarker = option("", " ", "¶", default="")
+	# Deprecated in 2026.3
 	wordWrap = boolean(default=true)
+	textWrap = featureFlag(optionsEnum="BrailleTextWrapFlag", behaviorOfDefault="AT_WORD_BOUNDARIES")
 	unicodeNormalization = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="disabled")
+	useChineseWordSegmentation = boolean(default=True)
 	focusContextPresentation = option("changedContext", "fill", "scroll", default="changedContext")
 	interruptSpeechWhileScrolling = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
 	speakOnRouting = boolean(default=false)
+	speakOnNavigatingByUnit = boolean(default=false)
 	showSelection = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
 	reportLiveRegions = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
 	fontFormattingDisplay = featureFlag(optionsEnum="FontFormattingBrailleModeFlag", behaviorOfDefault="LIBLOUIS")
 	[[auto]]
-    	excludedDisplays = string_list(default=list())
+		excludedDisplays = string_list(default=list("dotPad"))
 
 	# Braille display driver settings
 	[[__many__]]
@@ -108,11 +119,25 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	[[__many__]]
 		enabled = boolean(default=false)
 
+# Magnifier settings
+[magnifier]
+	enabled = boolean(default=false)
+	magnifiedView = string(default="fullscreen")
+	zoom = integer(min=100, max=5000, default=200)
+	filter = string(default="normal")
+	followMouse = boolean(default=True)
+	followSystemFocus = boolean(default=True)
+	followReviewCursor = boolean(default=True)
+	followNavigatorObject = boolean(default=True)
+	panStep = integer(min=1, max=100, default=10)
+	fullscreenMode = string(default="center")
+
 # Presentation settings
 [presentation]
 		reportKeyboardShortcuts = boolean(default=true)
 		reportObjectPositionInformation = boolean(default=true)
 		guessObjectPositionInformationWhenUnavailable = boolean(default=false)
+		reportMultiSelect = boolean(default=false)
 		reportTooltips = boolean(default=false)
 		reportHelpBalloons = boolean(default=true)
 		reportObjectDescriptions = boolean(default=True)
@@ -175,8 +200,10 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	# Default = 6: NumpadInsert + ExtendedInsert
 	NVDAModifierKeys = integer(1, 7, default=6)
 	keyboardLayout = string(default="desktop")
-	speakTypedCharacters = boolean(default=true)
-	speakTypedWords = boolean(default=false)
+	# 0: Off, 1: Only in edit controls, 2: Always
+	speakTypedCharacters = integer(default=1,min=0,max=2)
+	# 0: Off, 1: Only in edit controls, 2: Always
+	speakTypedWords = integer(default=0,min=0,max=2)
 	beepForLowercaseWithCapslock = boolean(default=true)
 	speakCommandKeys = boolean(default=false)
 	speechInterruptForCharacters = boolean(default=true)
@@ -196,13 +223,17 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	autoSayAllOnPageLoad = boolean(default=true)
 	trapNonCommandGestures = boolean(default=true)
 	enableOnPageLoad = boolean(default=true)
-	autoFocusFocusableElements = boolean(default=False)
 	loadChromiumVBufOnBusyState = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
 	textParagraphRegex = string(default="{configDefaults.DEFAULT_TEXT_PARAGRAPH_REGEX}")
+	# Element types available for cycling in browse touch mode.
+	browseModeTouchNavigationElements = string_list(default=list("heading", "link", "formField", "list", "table"))
+	findHistory = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="enabled")
+	nativeSelectionMode = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="disabled")
 
 [touch]
 	enabled = boolean(default=true)
 	touchTyping = boolean(default=False)
+	edgeGestures = boolean(default=False)
 
 #Settings for document reading (such as MS Word and wordpad)
 [documentFormatting]
@@ -211,8 +242,6 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	detectFormatAfterCursor = boolean(default=false)
 	reportFontName = boolean(default=false)
 	reportFontSize = boolean(default=false)
-	# Deprecated in 2025.1
-	reportFontAttributes = boolean(default=false)
 	# 0: Off, 1: Speech, 2: Braille, 3: Speech and Braille
 	fontAttributeReporting = integer(0, 3, default=0)
 	reportRevisions = boolean(default=true)
@@ -224,12 +253,16 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	reportAlignment = boolean(default=false)
 	reportLineSpacing = boolean(default=false)
 	reportStyle = boolean(default=false)
-	reportSpellingErrors = boolean(default=true)
+	# Bitwise combination of none, some or all values of ReportSpellingErrors
+	# 1: Speech, 2: Sound, 4: Braille
+	reportSpellingErrors2 = integer(min=0, max=7, default=1)
 	reportPage = boolean(default=true)
 	reportLineNumber = boolean(default=False)
 	# 0: Off, 1: Speech, 2: Tones, 3: Both Speech and Tones
 	reportLineIndentation = integer(0, 3, default=0)
 	ignoreBlankLinesForRLI = boolean(default=False)
+	# Duration of indentation beeps, in milliseconds
+	indentToneDuration = integer(min=10, max=2000, default=40)
 	reportParagraphIndentation = boolean(default=False)
 	reportTables = boolean(default=true)
 	includeLayoutTables = boolean(default=False)
@@ -239,6 +272,7 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	# 0: Off, 1: style, 2: color and style
 	reportCellBorders = integer(0, 2, default=0)
 	reportLinks = boolean(default=true)
+	reportLinkType = boolean(default=true)
 	reportGraphics = boolean(default=True)
 	reportComments = boolean(default=true)
 	reportBookmarks = boolean(default=true)
@@ -253,6 +287,9 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	reportClickable = boolean(default=true)
 
 [documentNavigation]
+	# Hidden option to eagerly initialize Chinese word segmentation even when the current languages do not use it.
+	initWordSegForUnusedLang = boolean(default=false)
+	wordSegmentationStandard = featureFlag(optionsEnum="WordNavigationUnitFlag", behaviorOfDefault="Auto")
 	paragraphStyle = featureFlag(optionsEnum="ParagraphNavigationFlag", behaviorOfDefault="application")
 
 [reviewCursor]
@@ -279,6 +316,7 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 [terminals]
 	speakPasswords = boolean(default=false)
 	keyboardSupportInLegacy = boolean(default=True)
+	beepForSkippedLines = boolean(default=true)
 	diffAlgo = option("auto", "dmp", "difflib", default="auto")
 	wtStrategy = featureFlag(optionsEnum="WindowsTerminalStrategyFlag", behaviorOfDefault="diffing")
 
@@ -287,6 +325,7 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	startupNotification = boolean(default=true)
 	allowUsageStats = boolean(default=false)
 	askedAllowUsageStats = boolean(default=false)
+	serverURL = string(default="")
 
 [inputComposition]
 	autoReportAllCandidates = boolean(default=True)
@@ -311,14 +350,16 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 	annotations = boolean(default=false)
 	events = boolean(default=false)
 	garbageHandler = boolean(default=false)
+	remoteClient = boolean(default=False)
+	externalPythonDependencies = boolean(default=False)
+	bdDetect = boolean(default=False)
+	magnifier = boolean(default=False)
 
 [uwpOcr]
 	language = string(default="")
 	autoRefresh = boolean(default=false)
 	autoRefreshInterval = integer(default=1500, min=100)
-
-[upgrade]
-	newLaptopKeyboardLayout = boolean(default=false)
+	autoSayAllOnResult = boolean(default=false)
 
 [editableText]
 	caretMoveTimeoutMs = integer(min=0, max=2000, default=100)
@@ -329,12 +370,204 @@ schemaVersion = integer(min=0, default={latestSchemaVersion})
 [featureFlag]
 	# 0:default, 1:yes, 2:no
 	cancelExpiredFocusSpeech = integer(0, 2, default=0)
-	# 0:Only in test versions, 1:yes
-	playErrorSound = integer(0, 1, default=0)
+	# 0: Only in test versions, 1: Yes, 2: No
+	playErrorSound = integer(0, 2, default=0)
+	speechDictsUseModernRegex = featureFlag(optionsEnum="BoolFlag", behaviorOfDefault="disabled")
 
 [addonStore]
-	showWarning = boolean(default=true)
-	automaticUpdates = option("notify", "disabled", default="notify")
+	automaticUpdates = option("notify", "update", "disabled", default="notify")
+	allowIncompatibleUpdates = boolean(default=false)
+	baseServerURL = string(default="")
+	# UpdateChannel values:
+	# same channel (default), any channel, do not update, stable, beta & dev, beta, dev
+	defaultUpdateChannel = integer(0, 6, default=0)
+
+# Remote Settings
+[remote]
+	enabled = boolean(default=False)
+	[[connections]]
+		lastConnected = string_list(default=list())
+	[[controlServer]]
+		autoconnect = boolean(default=False)
+		selfHosted = boolean(default=False)
+		# 0: follower, 1: leader
+		connectionMode = integer(default=0, min=0, max=1)
+		host = string(default="")
+		port = integer(default=6837)
+		key = string(default="")
+	[[seenMOTDs]]
+		__many__ = string(default="")
+	[[trustedCertificates]]
+		__many__ = string(default="")
+	[[ui]]
+		confirmDisconnectAsFollower = boolean(default=True)
+		muteOnLocalControl = boolean(default=False)
+
+[math]
+	[[speech]]
+		impairment = option("LearningDisability", "Blindness", "LowVision", default="Blindness")
+		# any known language code and sub-code -- could be en-uk, etc
+		language = string(default="en")
+		verbosity = option("Terse", "Medium", "Verbose", default="Medium")
+		# Change from text speech rate (%)
+		mathRate = integer(default=100, min=10, max=100)
+		# Change from normal pause length (%)
+		pauseFactor = integer(default=100, min=0, max=1056)
+		# make a sound when starting/ending math speech
+		speechSound = option("None", "Beep", default="None")
+		# NOTE: not currently working in MathCAT
+		subjectArea = string(default="General")
+		# SpellOut (H 2 O), AsCompound (Water), or Off (H sub 2 O)
+		chemistry = option("SpellOut", "AsCompound", "Off", default="SpellOut")
+		# Verbose, Brief, SuperBrief
+		mathSpeak = string(default="Verbose")
+
+		[[speech.speechOverrides]]
+			# word to say as a prefix/postfix for capital letters; empty string leaves it calling AT with Unicode fallback
+			capitalLetters = string(default="")
+			# word used as override (not implemented)
+			leftParen = string(default="")
+			# word used as override (not implemented)
+			rightParen = string(default="")
+
+		# see ClearSpeak speak for meanings
+		[[speech.ClearSpeak]]
+			# SayCaps or use pitch
+			capitalLetters = string(default="Auto")
+			# Valid values: AbsEnd, Cardinality, Determinant, Auto
+			absoluteValue = string(default="Auto")
+			# Valid values: Ordinal, Over, FracOver, General, EndFrac, GeneralEndFrac, OverEndFrac, Per, Auto
+			fractions = string(default="Auto")
+			# Valid values: Ordinal, OrdinalPower, AfterPower, Auto
+			exponents = string(default="Auto")
+			# Valid values: PosNegSqRoot, RootEnd, PosNegSqRootEnd, Auto
+			roots = string(default="Auto")
+			# Valid values: Auto, None
+			functions = string(default="Auto")
+			# Valid values: TrigInverse, ArcTrig, Auto
+			trig = string(default="Auto")
+			# Valid values: LnAsNaturalLog, Auto
+			log = string(default="Auto")
+			# Valid values: MoreImpliedTimes , None, Auto
+			impliedTimes = string(default="Auto")
+			# Valid values: Speak, SpeakNestingLevel, Silent, CoordPoint, Interval, Auto
+			paren = string(default="Auto")
+			# Valid values: SpeakColNum, SilentColNum, EndMatrix, Vector, EndVector, Combinatorics, Auto
+			matrix = string(default="Auto")
+			# Valid values: Case, Constraint, Equation, Line, None, Row, Step, Auto
+			multiLineLabel = string(default="Auto")
+			# Valid values: None, Auto
+			multiLineOverview = string(default="Auto")
+			# Valid values: Long, Short
+			multiLinePausesBetweenColumns = string(default="Short")
+			# Valid values: woAll, SilentBracket, Auto
+			sets = string(default="Auto")
+			# Valid values: By, Cross, Auto
+			multSymbolX = string(default="Auto")
+			# Valid values: Dot, Auto
+			multSymbolDot = string(default="Auto")
+			# Valid values: Delta, Auto
+			triangleSymbol = string(default="Auto")
+			# Valid values: AndSoOn, Auto
+			ellipses = string(default="Auto")
+			# Valid values: SuchThat, Divides, Given, Auto
+			verticalLine = string(default="Auto")
+			# Valid values: Belongs, Element, Member, Auto
+			setMemberSymbol = string(default="Auto")
+			# Valid values: Angle, Length, Auto
+			prime = string(default="Auto")
+			# Valid values: ChoosePermute, Auto
+			combinationPermutation = string(default="Auto")
+			# Valid values: Bar, Conjugate, Mean, Auto
+			bar = string(default="Auto")
+
+		# Set a different speechStyle depending on the language
+		[[__many__]]
+			# Any known speech style for the language
+			speechStyle = string(default="")
+
+	[[navigation]]
+		navMode = option("Enhanced", "Simple", "Character", default="Enhanced")
+		# remember previous value and use it
+		resetNavMode = boolean(default=false)
+		# speak the expression or give a description/overview
+		overview = boolean(default=false)
+		# remember previous value and use it
+		resetOverview = boolean(default=true)
+		# words to say for nav command
+		navVerbosity = option("Terse", "Medium", "Verbose", default="Medium")
+		# Auto zoom out of 2D exprs (use shift-arrow to force zoom out if unchecked)
+		autoZoomOut = boolean(default=true)
+		copyAs = option("MathML", "LaTeX", "ASCIIMath", "Speech", default="MathML")
+
+	[[braille]]
+		# Any supported Braille code (such as UEB) or "Auto"
+		brailleCode = string(default="Auto")
+		# Highlight with dots 7 & 8 the current nav node
+		brailleNavHighlight = option("Off", "FirstChar", "EndPoints", "All", default="EndPoints")
+		# true/false
+		useSpacesAroundAllOperators = boolean(default=false)
+
+		[[braille.nemeth]]
+			# Nemeth defines the typeforms: Bold, Italic, SansSerif, and Script. That leaves out DoubleStruck (Blackboard Bold)
+			# Here we provide an option to specify a transcriber-defined typeform changes, with the default mapping DoubleStruck to Italic
+			# first transcriber-defined typeform prefix indicator
+			sansSerif = string(default="⠠⠨")
+			bold = string(default="⠸")
+			doubleStruck = string(default="⠨")
+			script = string(default="⠈")
+			italic = string(default="⠨")
+
+		[[braille.UEB]]
+		   	# Grade1/Grade2 -- assumed starting mode UEB braille (Grade1 assumes we are in G1 passage mode)
+			startMode = string(default="Grade2")
+			# true/false
+			useSpacesAroundAllOperators = string(default=false)
+
+			# UEB Guide to Technical Material (https://iceb.org/Guidelines_for_Technical_Material_2008-10.pdf)
+			#   says to normally treat Fraktur and DoubleStruck as Script
+			# Here we provide an option to specify a transcriber-defined typeform prefix indicator instead
+			# Note: here are prefixes for 1st - 5th: "⠈⠼", "⠘⠼", "⠸⠼", "⠐⠼", "⠨⠼"
+			doubleStruck = string(default="⠈")
+			fraktur  = string(default="⠈")
+			sansSerif = string(default="⠈⠼")
+			greekVariant = string(default="⠨")
+
+		[[braille.vietnam]]
+			# drop digits down a row in simple numeric fractions
+			useDropNumbers = boolean(default=false)
+			# The guideline is being revised -- current guidance is to follow UEB for alternative scripts
+			# UEB Guide to Technical Material (https://iceb.org/Guidelines_for_Technical_Material_2008-10.pdf)
+			#   says to normally treat Fraktur and DoubleStruck as Script
+			# Here we provide an option to specify a transcriber-defined typeform prefix indicator instead
+			# Note: here are prefixes for 1st - 5th: "⠈⠼", "⠘⠼", "⠸⠼", "⠐⠼", "⠨⠼"
+			doubleStruck = string(default="⠈")
+			fraktur = string(default="⠈")
+			# first transcriber-defined typeform prefix indicator
+			sansSerif = string(default="⠈⠼")
+			# default to Greek
+			greekVariant = string(default="⠸")
+
+		[[braille.LaTeX]]
+			# Use the short form for the latex (e.g., "~a" instead of "\alpha")
+			useShortName = boolean(default=false)
+
+
+	[[other]]
+		# [default]
+		decimalSeparators = string(default=".")
+		# [default -- includes two forms of non-breaking spaces]
+		blockSeparators = string(default=", \u00a0\u202f")
+		# Auto, '.', ',', Custom
+		# Custom is not currently functional or surfaced in the UI, but is included here for future use.
+		decimalSeparator = string(default="Auto")
+		# Use native math speech instead of MathCAT in Word and Outlook
+		useWordNativeMath = boolean(default=false)
+
+[screenCurtain]
+	enabled = boolean(default=false)
+	warnOnLoad = boolean(default=true)
+	playToggleSounds = boolean(default=true)
 """
 
 #: The configuration specification

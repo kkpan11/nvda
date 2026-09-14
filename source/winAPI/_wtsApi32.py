@@ -10,13 +10,12 @@ https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/Recompile
 This file refers to this header with the convention `WtsApi32.h#L36` meaning line 36 of the above link.
 """
 
-from enum import (
+from enum import (  # noqa: I001
 	IntEnum,
 )
-from typing import Callable
+from collections.abc import Callable
 import ctypes  # Use for ctypes.Union to prevent name collision with typing.Union
 from ctypes import (
-	windll,
 	c_void_p,
 	c_wchar,
 	c_int,
@@ -29,9 +28,8 @@ from ctypes.wintypes import (
 	LONG,
 	LARGE_INTEGER,
 	LPWSTR,
-	BOOL,
 )
-
+import winBindings.wtsapi32
 
 WTS_CURRENT_SERVER_HANDLE = HANDLE(0)
 """ WTS_CURRENT_SERVER_HANDLE WtsApi32.h#L36
@@ -44,12 +42,7 @@ WTS_CURRENT_SESSION = DWORD(-1)
 
 # WTSFreeMemory Definition
 WTSFreeMemoryT = Callable[[c_void_p], None]
-WTSFreeMemory: WTSFreeMemoryT = windll.wtsapi32.WTSFreeMemory
-"""WtsApi32.h#L1245"""
-WTSFreeMemory.argtypes = (
-	c_void_p,  # [in] PVOID pMemory
-)
-WTSFreeMemory.restype = None
+WTSFreeMemory: WTSFreeMemoryT = winBindings.wtsapi32.WTSFreeMemory
 
 
 class WTS_INFO_CLASS(IntEnum):
@@ -168,15 +161,7 @@ WTSQuerySessionInformationT = Callable[
 	],
 	bool,
 ]
-WTSQuerySessionInformation: WTSQuerySessionInformationT = windll.wtsapi32.WTSQuerySessionInformationW
-WTSQuerySessionInformation.argtypes = (
-	HANDLE,  # [in] HANDLE hServer
-	DWORD,  # [ in] DWORD SessionId
-	c_int,  # [ in]  WTS_INFO_CLASS WTSInfoClass,
-	POINTER(LPWSTR),  # [out] LPWSTR * ppBuffer,
-	POINTER(DWORD),  # [out] DWORD * pBytesReturned
-)
-WTSQuerySessionInformation.restype = BOOL  # On Failure, the return value is zero.
+WTSQuerySessionInformation: WTSQuerySessionInformationT = winBindings.wtsapi32.WTSQuerySessionInformation
 
 
 class _WTS_LockState(IntEnum):
@@ -191,24 +176,6 @@ class _WTS_LockState(IntEnum):
 	"""The session is locked."""
 
 	WTS_SESSIONSTATE_UNLOCK = 0x1
-	"""The session is unlocked."""
-
-
-class _WTS_LockState_Win7(IntEnum):
-	"""Provide consistent interface to work around defect in Windows Server 2008 R2 and Windows 7.
-	Due to a code defect in Windows 7/Server 2008 the values are reversed.
-	That is:
-	- _WTS_LockState.WTS_SESSIONSTATE_LOCK (0x0) indicates that the session is unlocked
-	- _WTS_LockState.WTS_SESSIONSTATE_UNLOCK (0x1) indicates the session is locked.
-	"""
-
-	WTS_SESSIONSTATE_UNKNOWN = _WTS_LockState.WTS_SESSIONSTATE_UNKNOWN.value
-	"""The session state is not known."""
-
-	WTS_SESSIONSTATE_LOCK = _WTS_LockState.WTS_SESSIONSTATE_UNLOCK.value
-	"""The session is locked."""
-
-	WTS_SESSIONSTATE_UNLOCK = _WTS_LockState.WTS_SESSIONSTATE_LOCK.value
 	"""The session is unlocked."""
 
 

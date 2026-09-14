@@ -1,22 +1,18 @@
 # A part of NonVisual Desktop Access (NVDA)
-# This file is covered by the GNU General Public License.
-# See the file COPYING for more details.
-# Copyright (C) 2006-2023 NV Access Limited, Peter Vágner, Aleksey Sadovoy,
+# Copyright (C) 2006-2026 NV Access Limited, Peter Vágner, Aleksey Sadovoy,
 # Joseph Lee, Arnold Loubriat, Leonard de Ruijter
+# This file may be used under the terms of the GNU General Public License, version 2 or later, as modified by the NVDA license.
+# For full terms and any additional permissions, see the NVDA license file: https://github.com/nvaccess/nvda/blob/master/copying.txt
 
+from collections import OrderedDict  # noqa: I001
 import pkgutil
 import importlib
 from typing import (
-	List,
-	Optional,
-	OrderedDict,
-	Set,
-	Tuple,
+	TYPE_CHECKING,
 )
 from locale import strxfrm
 
 import config
-import winVersion
 import globalVars
 from logHandler import log
 from synthSettingsRing import SynthSettingsRing
@@ -30,6 +26,9 @@ from autoSettingsUtils.utils import StringParameterInfo
 
 from abc import abstractmethod
 
+if TYPE_CHECKING:
+	from speech.commands import SynthCommand
+
 
 class LanguageInfo(StringParameterInfo):
 	"""Holds information for a particular language"""
@@ -37,19 +36,19 @@ class LanguageInfo(StringParameterInfo):
 	def __init__(self, id):
 		"""Given a language ID (locale name) the description is automatically calculated."""
 		displayName = languageHandler.getLanguageDescription(id)
-		super(LanguageInfo, self).__init__(id, displayName)
+		super().__init__(id, displayName)
 
 
 class VoiceInfo(StringParameterInfo):
 	"""Provides information about a single synthesizer voice."""
 
-	def __init__(self, id, displayName, language: Optional[str] = None):
+	def __init__(self, id, displayName, language: str | None = None):
 		"""
 		@param language: The ID of the language this voice speaks,
 			C{None} if not known or the synth implements language separate from voices.
 		"""
 		self.language = language
-		super(VoiceInfo, self).__init__(id, displayName)
+		super().__init__(id, displayName)
 
 
 class SynthDriver(driverHandler.Driver):
@@ -96,8 +95,7 @@ class SynthDriver(driverHandler.Driver):
 	#: @type: str
 	description = ""
 	#: The speech commands supported by the synth.
-	#: @type: set of L{SynthCommand} subclasses.
-	supportedCommands = frozenset()
+	supportedCommands: set[type["SynthCommand"]] = frozenset()
 	#: The notifications provided by the synth.
 	#: @type: set of L{extensionPoints.Action} instances
 	supportedNotifications = frozenset()
@@ -110,10 +108,10 @@ class SynthDriver(driverHandler.Driver):
 	availableVoices: OrderedDict[str, VoiceInfo]
 	# type information for auto property _get_language
 	# the current voice's language
-	language: Optional[str]
+	language: str | None
 	# type information for auto property _get_availableLanguages
 	# the set of languages available in the availableVoices
-	availableLanguages: Set[Optional[str]]
+	availableLanguages: set[str | None]
 
 	@classmethod
 	def LanguageSetting(cls):
@@ -217,6 +215,29 @@ class SynthDriver(driverHandler.Driver):
 			displayName=pgettext("synth setting", "Inflection"),
 		)
 
+	@classmethod
+	def UseWasapiSetting(cls) -> BooleanDriverSetting:
+		"""Factory function for creating 'Use WASAPI' setting."""
+		return BooleanDriverSetting(
+			"useWasapi",
+			# Translators: Label for a setting in voice settings dialog.
+			# "WASAPI" is an acronym for an audio output framework, and should be translated as-is.
+			_("Use modern audio output system (WASAPI)"),
+			availableInSettingsRing=False,
+			defaultVal=True,
+		)
+
+	@classmethod
+	def PunctuationSilenceSetting(cls) -> BooleanDriverSetting:
+		"""Factory function for creating punctuation silence setting."""
+		return BooleanDriverSetting(
+			"punctuationSilence",
+			# Translators: Label for a setting toggle in voice settings dialog.
+			_("Natural pause after punctuation"),
+			availableInSettingsRing=False,
+			defaultVal=True,
+		)
+
 	@abstractmethod
 	def speak(self, speechSequence):
 		"""
@@ -229,13 +250,13 @@ class SynthDriver(driverHandler.Driver):
 	def cancel(self):
 		"""Silence speech immediately."""
 
-	def _get_language(self) -> Optional[str]:
+	def _get_language(self) -> str | None:
 		return self.availableVoices[self.voice].language
 
 	def _set_language(self, language):
 		raise NotImplementedError
 
-	def _get_availableLanguages(self) -> Set[Optional[str]]:
+	def _get_availableLanguages(self) -> set[str | None]:
 		return {self.availableVoices[v].language for v in self.availableVoices}
 
 	def _get_voice(self):
@@ -314,7 +335,31 @@ class SynthDriver(driverHandler.Driver):
 		@param switch: C{True} to pause, C{False} to resume (unpause).
 		@type switch: bool
 		"""
-		pass
+
+	def languageIsSupported(self, lang: str | None) -> bool:
+		"""Determines if the specified language is supported.
+		:param lang: A language code or None.
+		:return: ``True`` if the language is supported, ``False`` otherwise.
+		"""
+		if lang is None:
+			return True
+		normalizedLang = languageHandler.normalizeLanguage(lang)
+		if normalizedLang is None:
+			return False
+		rootLang = normalizedLang.split("_")[0]
+		normalizedAvailableLangs: set[str] = set()
+		for availableLang in self.availableLanguages:
+			if availableLang is None:
+				continue
+			normalizedAvailableLang = languageHandler.normalizeLanguage(availableLang)
+			if normalizedAvailableLang is None:
+				continue
+			normalizedAvailableLangs.add(normalizedAvailableLang)
+		if normalizedLang in normalizedAvailableLangs:
+			return True
+		if any(rootLang == availableLang.split("_")[0] for availableLang in normalizedAvailableLangs):  # noqa: SIM103
+			return True
+		return False
 
 	def initSettings(self):
 		firstLoad = not config.conf[self._configSection].isSet(self.name)
@@ -347,7 +392,7 @@ class SynthDriver(driverHandler.Driver):
 				try:
 					changeVoice(self, voice)
 				except:  # noqa: E722
-					log.warning("Invalid voice: %s" % voice)
+					log.warning("Invalid voice: %s" % voice)  # noqa: UP031
 					# Update the configuration with the correct voice.
 					c["voice"] = self.voice
 					# We need to call changeVoice here so that required initialisation can be performed.
@@ -383,7 +428,7 @@ class SynthDriver(driverHandler.Driver):
 		return None
 
 
-_curSynth: Optional[SynthDriver] = None
+_curSynth: SynthDriver | None = None
 _audioOutputDevice = None
 
 
@@ -404,14 +449,14 @@ def changeVoice(synth, voice):
 	speechDictHandler.loadVoiceDict(synth)
 
 
-def _getSynthDriver(name) -> SynthDriver:
-	return importlib.import_module("synthDrivers.%s" % name, package="synthDrivers").SynthDriver
+def _getSynthDriver(name: str) -> type[SynthDriver]:
+	return importlib.import_module("synthDrivers.%s" % name, package="synthDrivers").SynthDriver  # noqa: UP031
 
 
-def getSynthList() -> List[Tuple[str, str]]:
+def getSynthList() -> list[tuple[str, str]]:
 	from synthDrivers.silence import SynthDriver as SilenceSynthDriver
 
-	synthList: List[Tuple[str, str]] = []
+	synthList: list[tuple[str, str]] = []
 	# The synth that should be placed at the end of the list.
 	lastSynth = None
 	for loader, name, isPkg in pkgutil.iter_modules(synthDrivers.__path__):
@@ -420,7 +465,7 @@ def getSynthList() -> List[Tuple[str, str]]:
 		try:
 			synth = _getSynthDriver(name)
 		except:  # noqa: E722 # Legacy bare except
-			log.error("Error while importing SynthDriver %s" % name, exc_info=True)
+			log.error("Error while importing SynthDriver %s" % name, exc_info=True)  # noqa: G201, UP031
 			continue
 		try:
 			if synth.check():
@@ -429,21 +474,21 @@ def getSynthList() -> List[Tuple[str, str]]:
 				else:
 					synthList.append((synth.name, synth.description))
 			else:
-				log.debugWarning("Synthesizer '%s' doesn't pass the check, excluding from list" % name)
+				log.debugWarning("Synthesizer '%s' doesn't pass the check, excluding from list" % name)  # noqa: UP031
 		except:  # noqa: E722 # Legacy bare except
-			log.error("", exc_info=True)
+			log.error("", exc_info=True)  # noqa: G201
 	synthList.sort(key=lambda s: strxfrm(s[1]))
 	if lastSynth:
 		synthList.append(lastSynth)
 	return synthList
 
 
-def getSynth() -> Optional[SynthDriver]:
+def getSynth() -> SynthDriver | None:
 	return _curSynth
 
 
-def getSynthInstance(name, asDefault=False):
-	newSynth: SynthDriver = _getSynthDriver(name)()
+def getSynthInstance(name: str, asDefault: bool = False):
+	newSynth = _getSynthDriver(name)()
 	if asDefault and newSynth.name == "oneCore":
 		# Will raise an exception if oneCore does not support the system language
 		newSynth._getDefaultVoice(pickAny=False)
@@ -453,26 +498,35 @@ def getSynthInstance(name, asDefault=False):
 
 # The synthDrivers that should be used by default.
 # The first that successfully initializes will be used when config is set to auto (I.e. new installs of NVDA).
-defaultSynthPriorityList = ["espeak", "silence"]
-if winVersion.getWinVer() >= winVersion.WIN10:
-	# Default to OneCore on Windows 10 and above
-	defaultSynthPriorityList.insert(0, "oneCore")
+defaultSynthPriorityList = ["oneCore", "espeak", "silence"]
 
 
-def setSynth(name: Optional[str], isFallback: bool = False):
+def setSynth(name: str | None, isFallback: bool = False, *, _leftToTry: list[str] | None = None) -> bool:
+	"""Set the currently active speech synth by name.
+
+	If the chosen synth cannot be used, this function will attempt to fall back to another synth.
+	Fallback synths are tried in the order given in :var:`defaultSynthPriorityList `.
+
+	:param name: The name of the synth driver to use.
+	:param isFallback: Whether this synth is a fallback, i.e. it isn't the synth that the user wants. Defaults to ``False``.
+	:param _leftToTry: List of synth names to try falling back to, in reverse order of priority. Defaults to ``None``.
+		If ``None``, the list will be calculated automatically.
+	:return: ``True`` if switching to the named synthesizer succeeds; ``False`` otherwise.
+	"""
 	from synthDrivers.silence import SynthDriver as SilenceSynthDriver
 
 	asDefault = False
 	global _curSynth, _audioOutputDevice
 	if name is None:
-		_curSynth.cancel()
-		_curSynth.terminate()
-		_curSynth = None
+		if _curSynth is not None:
+			_curSynth.cancel()
+			_curSynth.terminate()
+			_curSynth = None
 		return True
 	if name == "auto":
 		asDefault = True
 		name = defaultSynthPriorityList[0]
-	if _curSynth:
+	if _curSynth is not None:
 		_curSynth.cancel()
 		_curSynth.terminate()
 		prevSynthName = _curSynth.name
@@ -482,42 +536,47 @@ def setSynth(name: Optional[str], isFallback: bool = False):
 	try:
 		_curSynth = getSynthInstance(name, asDefault)
 	except:  # noqa: E722 # Legacy bare except
-		log.error(f"setSynth failed for {name}", exc_info=True)
+		log.error(f"setSynth failed for {name}", exc_info=True)  # noqa: G201
 
 	if _curSynth is not None:
-		_audioOutputDevice = config.conf["speech"]["outputDevice"]
+		_audioOutputDevice = config.conf["audio"]["outputDevice"]
 		if not isFallback:
 			config.conf["speech"]["synth"] = name
 		log.info(f"Loaded synthDriver {_curSynth.name}")
 		synthChanged.notify(synth=_curSynth, audioOutputDevice=_audioOutputDevice, isFallback=isFallback)
 		return True
 	# As there was an error loading this synth:
-	elif prevSynthName and not prevSynthName == SilenceSynthDriver.name:
+	elif prevSynthName and not prevSynthName == SilenceSynthDriver.name:  # noqa: SIM201
 		# Don't fall back to silence if speech is expected
 		log.info(f"Falling back to previous synthDriver {prevSynthName}")
 		# There was a previous synthesizer, so switch back to that one.
 		setSynth(prevSynthName, isFallback=True)
 	else:
-		# There was no previous synth, so fallback to the next available default synthesizer
+		# There was no previous synth, so fall back to the first available default synthesizer
 		# that has not been tried yet.
 		log.info("Searching for next synthDriver")
-		findAndSetNextSynth(name)
+		findAndSetNextSynth(name, _leftToTry=_leftToTry)
 	return False
 
 
-def findAndSetNextSynth(currentSynthName: str) -> bool:
-	"""Returns True if the next synth could be found, False if currentSynthName is the last synth
-	in the defaultSynthPriorityList"""
-	if currentSynthName in defaultSynthPriorityList:
-		nextIndex = defaultSynthPriorityList.index(currentSynthName) + 1
-	else:
-		nextIndex = 0
-	if nextIndex < len(defaultSynthPriorityList):
-		newName = defaultSynthPriorityList[nextIndex]
+def findAndSetNextSynth(currentSynthName: str, *, _leftToTry: list[str] | None = None) -> bool:
+	"""Finds the first untried synth in ``defaultSynthPriorityList`` and switches to it.
+
+	:param currentSynthName: The name of the synth driver that was just tried.
+		Only used if ``_leftToTry`` is ``None``.
+	:param _leftToTry: A list of synth drivers that haven't been tried yet, in reverse order of priority. Defaults to ``None``.
+		If ``None``, the list of synths left to try will be calculated automatically.
+	:return: ``True`` if an attempt was made to switch to a synth driver; ``False`` if there are no more drivers in ``defaultSynthPriorityList `` to try.
+	"""
+	if _leftToTry is None:
+		_leftToTry = [synth for synth in reversed(defaultSynthPriorityList) if synth != currentSynthName]
+	if len(_leftToTry) > 0:
+		newName = _leftToTry.pop()
 		log.info(f"Falling back to next synthDriver {newName}")
-		setSynth(newName, isFallback=True)
+		setSynth(newName, isFallback=True, _leftToTry=_leftToTry)
 		return True
-	return False
+	else:
+		return False
 
 
 def handlePostConfigProfileSwitch(resetSpeechIfNeeded=True):
@@ -530,7 +589,7 @@ def handlePostConfigProfileSwitch(resetSpeechIfNeeded=True):
 	@type resetSpeechIfNeeded: bool
 	"""
 	conf = config.conf["speech"]
-	if conf["synth"] != _curSynth.name or conf["outputDevice"] != _audioOutputDevice:
+	if conf["synth"] != _curSynth.name or config.conf["audio"]["outputDevice"] != _audioOutputDevice:
 		if resetSpeechIfNeeded:
 			# Reset the speech queues as we are now going to be using a new synthesizer with entirely separate state.
 			import speech
@@ -566,4 +625,12 @@ The local system should be notified about synth parameters at the remote system.
 @type audioOutputDevice: str
 @param isFallback: Whether the synth is set as fallback synth due to another synth's failure
 @type isFallback: bool
+"""
+
+pre_synthSpeak = extensionPoints.Action()
+"""
+Notifies when speak() of the current synthesizer is about to be called.
+
+:param speechSequence: the speech sequence to pass to speak()
+:type speechSequence: speech.SpeechSequence
 """

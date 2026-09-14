@@ -1,12 +1,12 @@
 # A part of NonVisual Desktop Access (NVDA)
-# Copyright (C) 2006-2024 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Mesar Hameed, Joseph Lee,
+# Copyright (C) 2006-2025 NV Access Limited, Peter Vágner, Aleksey Sadovoy, Mesar Hameed, Joseph Lee,
 # Thomas Stivers, Babbage B.V., Accessolutions, Julien Cochuyt, Cyrille Bougot
 # This file may be used under the terms of the GNU General Public License, version 2 or later.
 # For more details see: https://www.gnu.org/licenses/gpl-2.0.html
 # See the file COPYING for more details.
 
 
-import config
+import config  # noqa: I001
 import core
 from enum import auto, unique
 import globalVars
@@ -135,7 +135,7 @@ class ExitDialog(wx.Dialog):
 		self.CentreOnScreen()
 
 	def onOk(self, evt):
-		action = [a for a in _ExitAction if a.displayString == self.actionsList.GetStringSelection()][0]
+		action = [a for a in _ExitAction if a.displayString == self.actionsList.GetStringSelection()][0]  # noqa: RUF015
 		if action == _ExitAction.EXIT:
 			WelcomeDialog.closeInstances()
 			if core.triggerNVDAExit():
@@ -163,8 +163,16 @@ class ExitDialog(wx.Dialog):
 			queueHandler.queueFunction(queueHandler.eventQueue, core.restart, debugLogging=True)
 		elif action == _ExitAction.INSTALL_PENDING_UPDATE:
 			if updateCheck:
+				from _remoteClient import _remoteClient
+
+				if (
+					_remoteClient is not None
+					and _remoteClient.isConnectedAsFollower
+					and not updateCheck._warnAndConfirmIfUpdatingRemotely()
+				):
+					return
 				destPath, version, apiVersion, backCompatTo = updateCheck.getPendingUpdate()
-				from addonHandler import getIncompatibleAddons
+				from addonHandler import getIncompatibleAddons  # noqa: I001
 				from gui import mainFrame
 
 				if any(
@@ -177,7 +185,7 @@ class ExitDialog(wx.Dialog):
 						apiVersion=apiVersion,
 						backCompatTo=backCompatTo,
 					)
-					displayDialogAsModal(confirmUpdateDialog)
+					confirmUpdateDialog.callback(displayDialogAsModal(confirmUpdateDialog))
 				else:
 					updateCheck.executePendingUpdate()
 		wx.CallAfter(self.Destroy)

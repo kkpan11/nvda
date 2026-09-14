@@ -5,13 +5,14 @@
 
 """Base classes with common support for browsers exposing IAccessible2."""
 
-from typing import (
-	Generator,
-	Optional,
-	Tuple,
+from typing import (  # noqa: I001
+	TYPE_CHECKING,
 )
+from collections.abc import Generator
+import re
 from ctypes import c_short
 from comtypes import COMError, BSTR
+from comtypes.hresult import E_NOTIMPL
 
 import oleacc
 from annotation import (
@@ -23,6 +24,7 @@ from comInterfaces import IAccessible2Lib as IA2
 import controlTypes
 from logHandler import log
 from documentBase import DocumentWithTableNavigation
+from IAccessibleHandler.utils import isMSAADebugLoggingEnabled
 from NVDAObjects.behaviors import Dialog, WebDialog
 from . import IAccessible, Groupbox
 from .ia2TextMozilla import MozillaCompoundTextInfo
@@ -31,6 +33,10 @@ import api
 import speech
 import config
 import NVDAObjects
+
+if TYPE_CHECKING:
+	from locationHelper import RectLTRB
+	from mathPres._mathMlNode import MathMlNodePath, MathMlNodeRectInfo
 
 
 class IA2WebAnnotationTarget(AnnotationTarget):
@@ -59,7 +65,7 @@ class IA2WebAnnotation(AnnotationOrigin):
 		)
 
 	@property
-	def targets(self) -> Tuple[AnnotationTarget]:
+	def targets(self) -> tuple[AnnotationTarget]:
 		if not bool(self):
 			# optimisation that avoids having to fetch details relations which may be a more costly procedure.
 			if config.conf["debugLog"]["annotations"]:
@@ -73,7 +79,7 @@ class IA2WebAnnotation(AnnotationOrigin):
 		return tuple(self._rolesGenerator)
 
 	@property
-	def _rolesGenerator(self) -> Generator[Optional[controlTypes.Role], None, None]:
+	def _rolesGenerator(self) -> Generator[controlTypes.Role | None]:
 		"""
 		Since Chromium exposes the roles via the "details-roles" IA2Attributes, an optimisation can be used
 		to return them.
@@ -95,7 +101,7 @@ class IA2WebAnnotation(AnnotationOrigin):
 			# Created supported details role
 			detailsRole = supportedAriaDetailsRoles.get(roleStr)
 			if config.conf["debugLog"]["annotations"]:
-				log.debug(f"detailsRole: {repr(detailsRole)}")
+				log.debug(f"detailsRole: {detailsRole!r}")
 			yield detailsRole
 
 
@@ -117,7 +123,7 @@ class Ia2Web(IAccessible):
 		return bool(res)
 
 	def _get_positionInfo(self):
-		info = super(Ia2Web, self).positionInfo
+		info = super().positionInfo
 		level = info.get("level", None)
 		if not level:
 			level = self.IA2Attributes.get("level", None)
@@ -126,7 +132,7 @@ class Ia2Web(IAccessible):
 		return info
 
 	def _get_descriptionFrom(self) -> controlTypes.DescriptionFrom:
-		ia2attrDescriptionFrom: Optional[str] = self.IA2Attributes.get("description-from")
+		ia2attrDescriptionFrom: str | None = self.IA2Attributes.get("description-from")
 		try:
 			return controlTypes.DescriptionFrom(ia2attrDescriptionFrom)
 		except ValueError:
@@ -142,7 +148,7 @@ class Ia2Web(IAccessible):
 		annotationOrigin = IA2WebAnnotation(self)
 		return annotationOrigin
 
-	def _get_detailsSummary(self) -> Optional[str]:
+	def _get_detailsSummary(self) -> str | None:
 		log.warning(
 			"NVDAObject.detailsSummary is deprecated. Use NVDAObject.annotations instead.",
 			stack_info=True,
@@ -158,7 +164,7 @@ class Ia2Web(IAccessible):
 		)
 		return bool(self.annotations)
 
-	def _get_detailsRole(self) -> Optional[controlTypes.Role]:
+	def _get_detailsRole(self) -> controlTypes.Role | None:
 		log.warning(
 			"NVDAObject.detailsRole is deprecated. Use NVDAObject.annotations instead.",
 			stack_info=True,
@@ -183,7 +189,7 @@ class Ia2Web(IAccessible):
 			# It is not useful to present IAccessible2 table rows in the focus ancestry as  cells contain row and column information anyway.
 			# Also presenting the rows would cause duplication of information
 			return False
-		return super(Ia2Web, self).isPresentableFocusAncestor
+		return super().isPresentableFocusAncestor
 
 	def _get_roleText(self):
 		roleText = self.IA2Attributes.get("roledescription")
@@ -198,7 +204,7 @@ class Ia2Web(IAccessible):
 		return super().roleTextBraille
 
 	def _get_states(self):
-		states = super(Ia2Web, self).states
+		states = super().states
 		# Ensure that ARIA gridcells always get the focusable state, even if the Browser fails to provide it.
 		# This is necessary for other code that calculates how selection of cells should be spoken.
 		if "gridcell" in self.IA2Attributes.get("xml-roles", "").split(" "):
@@ -213,6 +219,8 @@ class Ia2Web(IAccessible):
 			if popupState:
 				states.discard(controlTypes.State.HASPOPUP)
 				states.add(popupState)
+		if self.role == controlTypes.Role.LINK and controlTypes.State.LINKED in states and self.linkType:
+			states.add(self.linkType)
 		return states
 
 	def _get_landmark(self):
@@ -242,8 +250,8 @@ class Ia2Web(IAccessible):
 		try:
 			return aria.AriaLivePoliteness(politeness.lower())
 		except ValueError:
-			log.error(f"Unknown live politeness of {politeness}", exc_info=True)
-			super().liveRegionPoliteness
+			log.error(f"Unknown live politeness of {politeness}", exc_info=True)  # noqa: G201
+			super().liveRegionPoliteness  # noqa: B018
 
 
 class Document(Ia2Web):
@@ -326,36 +334,125 @@ class EditorChunk(Ia2Web):
 
 
 class Math(Ia2Web):
-	def _get_mathMl(self):
-		from comtypes.gen.ISimpleDOM import ISimpleDOMNode
+	def _getMathElementChildren(self, obj: NVDAObjects.NVDAObject) -> tuple[IAccessible, ...]:
+		return tuple(
+			child
+			for child in obj.children
+			if isinstance(child, IAccessible) and child.IA2Attributes.get("tag")
+		)
+
+	def _getMathNodeMapRoot(self) -> IAccessible:
+		if self.IA2Attributes.get("tag") == "math":
+			return self
+		mathChildren = tuple(
+			child for child in self._getMathElementChildren(self) if child.IA2Attributes.get("tag") == "math"
+		)
+		return mathChildren[0] if len(mathChildren) == 1 else self
+
+	def _getMathNodeRectFromObj(self, obj: IAccessible) -> "RectLTRB | None":
+		if obj.hasIrrelevantLocation:
+			return None
+		location = obj.location
+		if not location or not location.width or not location.height:
+			return None
+		return location.toLTRB()
+
+	def _getMathNodeInfoByPath(self) -> dict["MathMlNodePath", "MathMlNodeRectInfo"]:
+		"""Map MathML element paths to tag names and screen rectangles for this IA2 math subtree.
+
+		Paths are tuples where each entry indicates an index of a child node to be traversed from the root.
+		"""
+		# Avoid importing mathPres at startup.
+		from mathPres._mathMlNode import MathMlNodeRectInfo
+
+		nodeInfoByPath: dict[MathMlNodePath, MathMlNodeRectInfo] = {}
+		stack: list[tuple[IAccessible, MathMlNodePath]] = [
+			(self._getMathNodeMapRoot(), ()),
+		]
+		visitedCount = 0
+		while stack:
+			obj, path = stack.pop()
+			visitedCount += 1
+			tag = obj.IA2Attributes.get("tag")
+			if tag and (rect := self._getMathNodeRectFromObj(obj)):
+				nodeInfoByPath[path] = MathMlNodeRectInfo(path=path, tag=tag, rect=rect)
+			children = self._getMathElementChildren(obj)
+			stack.extend((child, path + (index,)) for index, child in enumerate(children))
+		log.debug(
+			f"Math highlight built IA2 path map with {len(nodeInfoByPath)} usable rectangles "
+			f"after visiting {visitedCount} MathML element objects",
+		)
+		return nodeInfoByPath
+
+	def _get_mathMl(self) -> str:
+		isNativeMath = self.IA2Attributes.get("tag") == "math"
+		# Chromium exposes an element's inner HTML through the IA2 'math' attribute
+		# for both native MathML and HTML elements with role="math".
+		mathAttr = self.IA2Attributes.get("math")
+		if mathAttr and isNativeMath:
+			# Chromium sometimes embeds HTML comments in the MathML, strip them
+			mathAttr = re.sub(r"<!--.*?-->", "", mathAttr, flags=re.DOTALL)
+
+			langAttr = f' xml:lang="{self.language}"' if self.language else ""
+			mathMl = f"<math{langAttr}>{mathAttr}</math>"
+			if log.isEnabledFor(log.DEBUG) and isMSAADebugLoggingEnabled():
+				log.debug(f"Got MathML from IA2 math attribute: {mathMl}")
+			return mathMl
+
+		from comtypes.gen.ISimpleDOM import ISimpleDOMNode  # type: ignore[reportMissingImports]
 
 		try:
 			node = self.IAccessibleObject.QueryInterface(ISimpleDOMNode)
 			# Try the data-mathml attribute.
 			attrNames = (BSTR * 1)("data-mathml")
 			namespaceIds = (c_short * 1)(0)
-			attr = node.attributesForNames(1, attrNames, namespaceIds)
+			try:
+				attr = node.attributesForNames(1, attrNames, namespaceIds)
+			except COMError as e:
+				if e.hresult != E_NOTIMPL:
+					log.debugWarning(f"MathML getting attr error: {e}")
+					raise
+				attr = None
 			if attr:
 				import mathPres
 
 				if not mathPres.getLanguageFromMath(attr) and self.language:
 					attr = mathPres.insertLanguageIntoMath(attr, self.language)
 				return attr
-			if self.IA2Attributes.get("tag") != "math":
-				# This isn't MathML.
-				raise LookupError
-			if self.language:
-				attrs = ' xml:lang="%s"' % self.language
-			else:
-				attrs = ""
-			return "<math%s>%s</math>" % (attrs, node.innerHTML)
+			if isNativeMath:
+				if self.language:
+					attrs = ' xml:lang="%s"' % self.language  # noqa: UP031
+				else:
+					attrs = ""
+				return "<math%s>%s</math>" % (attrs, node.innerHTML)  # noqa: UP031
 		except COMError:
 			log.debugWarning(
 				"Error retrieving math. "
 				"Not supported in this browser or ISimpleDOM COM proxy not registered.",
 				exc_info=True,
 			)
-			raise LookupError
+			if isNativeMath:
+				raise LookupError
+		# This could be an HTML element with role="math" wrapping native MathML.
+		mathObjs: list[NVDAObjects.NVDAObject] = [
+			child for child in self.children if child.IA2Attributes.get("tag") == "math"
+		]
+		if len(mathObjs) == 1:
+			return mathObjs[0].mathMl
+		# This isn't MathML.
+		raise LookupError
+
+	def _get_role(self):
+		if self.IA2Attributes.get("tag") == "img":
+			try:
+				mathMl = self.mathMl
+			except LookupError:
+				mathMl = None
+			if mathMl is None:
+				# #16007: Many publishers were setting role=math on plain images with alt text.
+				# We want to just treat these as normal images.
+				return controlTypes.Role.GRAPHIC
+		return super().role
 
 
 class Switch(Ia2Web):
@@ -426,7 +523,7 @@ def findExtraOverlayClasses(obj, clsList, baseClass=Ia2Web, documentClass=None):
 		else:
 			clsList.append(EditorChunk)
 
-	if iaRole in (oleacc.ROLE_SYSTEM_DIALOG, oleacc.ROLE_SYSTEM_PROPERTYPAGE):
+	if iaRole in (oleacc.ROLE_SYSTEM_DIALOG, oleacc.ROLE_SYSTEM_PROPERTYPAGE):  # noqa: SIM102
 		if "dialog" in xmlRoles or "tabpanel" in xmlRoles:
 			# #2390: Don't try to calculate text for ARIA dialogs.
 			# #4638: Don't try to calculate text for ARIA tab panels.
